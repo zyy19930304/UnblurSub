@@ -15,6 +15,7 @@ const S = {
   job: { jobs: [], summary: {}, running: false },
   modes: [], mode: 2,
   logSeq: 0, pollTimer: null, browseTarget: 'folder',
+  logGen: 0,                 // 日志世代号：清空日志时 +1，令在途轮询响应作废
   saveKind: 'sub',           // 另存配置弹窗当前针对哪套参数
 };
 
@@ -122,12 +123,21 @@ function renderModes() {
 }
 
 function setMode(m) {
-  if (Number(m) === S.mode) return;
-  S.mode = Number(m);
+  const v = Number(m);
+  if (!MODE_META[v]) { toast('未知的处理模式：' + m, 'err'); return; }
+  if (v === S.mode) return;
+  S.mode = v;
   applySettings(Object.assign({}, S.settings, { mode: S.mode }));
   renderModes();
   applyMode();
   toast('已切换到「' + modeMeta(S.mode).label + '」', 'ok');
+  // 立刻落盘：早先只改了内存里的 S.settings，而关闭流程的 patch 里
+  // 并不含 mode，于是用户上次退出时的处理模式永远存不下来。
+  // 这里先写一次，doQuit() 再兜底一次（防止 quit 前才切换的漏网）。
+  //
+  // 注意：不能复用 saveSettings() —— 它会从设置弹窗 DOM 读全部字段，
+  // 而弹窗可能从未打开过（DOM 全空），会把已保存的 fw_dir/video_exts 清空。
+  api('/api/save_settings', { mode: S.mode }).catch(() => { });
   scanAll(true);          // 换模式等于换跳过规则，重算勾选与输出名
 }
 
@@ -747,6 +757,13 @@ async function start() {
     $('#btnStart').disabled = true; $('#btnStop').disabled = false;
     toast(`开始处理 ${paths.length} 个文件（${meta.label}）`, 'ok');
     $('#jobList').innerHTML = '';
+    // /api/start 内部会清空后端日志缓冲并推进水位线，
+    // 前端游标必须跟着回退到新的水位线，否则第一批日志会被整个跳过。
+    try {
+      const lg = await api('/api/job/logs?since=0');
+      if (lg && lg.seq != null) S.logSeq = lg.seq;
+      S.logGen++;
+    } catch (e) { /* 忽略 */ }
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -790,11 +807,17 @@ function statusText(s) {
 function startPolling() {
   if (S.pollTimer) return;
   S.pollTimer = setInterval(async () => {
+    // 本次请求的世代号。点「清空日志」会让世代号 +1，
+    // 于是清空前发出、清空后才返回的响应会被识别为过期并丢弃 ——
+    // 否则那批旧日志会被 append 回刚清空的列表，正是「清空后旧日志又出来」的成因。
+    const gen = S.logGen;
+    const since = S.logSeq;
     try {
       const [lg, js] = await Promise.all([
-        api('/api/job/logs?since=' + S.logSeq),
+        api('/api/job/logs?since=' + since),
         api('/api/job/state'),
       ]);
+      if (gen !== S.logGen) { renderJobs(js); return; }   // 已过期，只刷新任务区
       if (lg.lines.length) {
         S.logSeq = lg.seq;
         const box = $('#logBox');
@@ -802,10 +825,25 @@ function startPolling() {
         box.insertAdjacentHTML('beforeend', lg.lines.map(l =>
           `<div class="log-line ${esc(l.level)}"><span class="tm">${esc(l.t)}</span>${esc(l.text)}</div>`).join(''));
         if (atBottom) box.scrollTop = box.scrollHeight;
+      } else if (lg.seq != null) {
+        // 没有新行也要推进游标，否则停跑后再启动会把缓冲里的旧行全捞回来
+        S.logSeq = lg.seq;
       }
       renderJobs(js);
     } catch (e) { /* 服务未就绪 */ }
   }, 900);
+}
+
+/* 清空日志：后端推进水位线 + 前端清 DOM 并把游标推到水位线 */
+async function clearLog() {
+  $('#logBox').innerHTML = '';
+  S.logGen++;                 // 让所有在途响应作废
+  try {
+    const r = await api('/api/job/logs/clear', {});
+    S.logSeq = r.cleared_at || 0;   // 游标必须跟后端水位线对齐
+  } catch (e) {
+    toast('清空日志失败：' + e.message, 'err');
+  }
 }
 
 /* ---------------- 配置方案操作 ---------------- */
@@ -862,7 +900,12 @@ async function doQuit() {
   // 只持久化"内存里已经变更过"的字段。
   // 注意：绝不能在这里调用 saveSettings({})——它会从设置弹窗的 DOM 读值，
   // 而弹窗可能从未打开过（DOM 全空），会把用户已保存的 fw_dir/video_exts 等清空。
-  const patch = { last_profile: S.lastProfile, last_jasna_profile: S.lastJasnaProfile };
+  // 同理 mode 直接取内存里的 S.mode，不走 DOM、也不依赖异步落盘是否已返回。
+  const patch = {
+    mode: S.mode,
+    last_profile: S.lastProfile,
+    last_jasna_profile: S.lastJasnaProfile,
+  };
   if (S._dirtyKeys) {
     Object.assign(patch, S._dirtyKeys);
     S._dirtyKeys = null;
@@ -911,7 +954,10 @@ async function finishQuit() {
         recursive: cfg('recursive', true), close_prompt: cfg('close_prompt', true),
         existing_output_policy: cfg('existing_output_policy', 'number'),
         auto_select_rule: cfg('auto_select_rule', 'smart'), video_exts: cfg('video_exts', []),
-        folders: cfg('folders', []), selected: cfg('selected', {}), mode: cfg('mode', 2),
+        folders: cfg('folders', []), selected: cfg('selected', {}),
+        // 用内存里的 S.mode 而非 cfg('mode')：setMode 先改内存再异步落盘，
+        // 若此刻落盘请求还没回来，cfg 读到的还是旧模式。
+        mode: S.mode,
         last_profile: subName || S.lastProfile,
         last_jasna_profile: jasnaName || S.lastJasnaProfile,
       },
@@ -1149,7 +1195,7 @@ function bind() {
   $('#btnStart').onclick = start;
   $('#btnStop').onclick = stop;
   $('#btnClearDone').onclick = async () => { await api('/api/job/clear_finished'); };
-  $('#btnClearLog').onclick = () => { $('#logBox').innerHTML = ''; };
+  $('#btnClearLog').onclick = clearLog;
   $('#btnCloseApp').onclick = doQuit;
 
   $('#btnQuitSave').onclick = () => { closeModal('#modalQuit'); finishQuit(); };

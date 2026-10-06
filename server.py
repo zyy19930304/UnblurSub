@@ -454,6 +454,17 @@ def api_job_logs(_body, q):
     return {"lines": items, "seq": cur}
 
 
+def api_job_logs_clear(_body, _q):
+    """清空日志。
+
+    必须同时做两件事，缺一就会出现「清空后旧日志又冒出来」：
+      1. 后端推进水位线，把清空前的行彻底作废；
+      2. 返回该水位线，让前端把游标推过去 —— 否则前端仍拿着旧游标去拉，
+         缓冲里残留的行会被再次捞回来。
+    """
+    return {"ok": True, "cleared_at": MANAGER.log.clear()}
+
+
 def api_clear_finished(_body, _q):
     return {"removed": MANAGER.clear_finished(), "state": MANAGER.state()}
 
@@ -560,6 +571,7 @@ ROUTES = {
     "/api/stop": api_stop,
     "/api/job/state": api_job_state,
     "/api/job/logs": api_job_logs,
+    "/api/job/logs/clear": api_job_logs_clear,
     "/api/job/clear_finished": api_clear_finished,
     "/api/preview_cmd": api_preview_cmd,
     "/api/shutdown_prompt": api_shutdown_prompt,

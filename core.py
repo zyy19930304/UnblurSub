@@ -409,6 +409,28 @@ def infer_exe(fw_dir: str) -> Path:
     return Path(fw_dir) / "infer.exe"
 
 
+def is_pe_exe(path) -> bool:
+    """粗判是否为 Windows 可执行文件（PE 格式）。
+
+    只看 DOS 头的 MZ 魔数与 e_lfanew 指向处的 PE 签名，不解析完整结构。
+    用途：挡掉「文件名叫infer.exe 但其实是文本/占位文件」的坏目录。
+    早先只查存在性，用户若把路径指错、或目录里放的是说明文档，
+    运行期才会弹WinError 216「与 64 位 Windows 不兼容」，很难定位。
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(2) != b"MZ":
+                return False
+            f.seek(0x3C)
+            off = f.read(4)
+            if len(off) != 4:
+                return False
+            f.seek(int.from_bytes(off, "little"))
+            return f.read(4) == b"PE\x00\x00"
+    except (OSError, ValueError):
+        return False
+
+
 def validate_fw_dir(path: str) -> dict:
     """校验 Faster Whisper 程序目录。"""
     if not path:
@@ -421,6 +443,9 @@ def validate_fw_dir(path: str) -> dict:
         return {"ok": False, "msg": f"不是文件夹：{p}"}
     if not exe.exists():
         return {"ok": False, "msg": f"目录中未找到 infer.exe：{exe}"}
+    if not is_pe_exe(exe):
+        return {"ok": False,
+                "msg": f"infer.exe 不是有效的 Windows 程序（可能选错了目录）：{exe}"}
     models = p / "models"
     info = {"ok": True, "msg": f"已找到 {exe.name}",
             "has_models": models.exists(),

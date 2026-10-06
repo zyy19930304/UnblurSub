@@ -29,12 +29,20 @@ import jasna_core
 
 
 class LogBus:
-    """环形日志缓冲，供前端轮询。"""
+    """环形日志缓冲，供前端轮询。
+
+    清空语义（曾导致「清空后旧日志又冒出来」）：
+    早先clear() 只清 _buf 而不动 _seq，前端却按自己的水位线来拉取，
+    于是清空前残留的行会再次被捞回来。现在引入 _cleared_at水位线：
+    清空后凡是 seq <= _cleared_at 的行一律不再返回，
+    前端也据此把自己的游标推到水位线，两边对齐。
+    """
 
     def __init__(self, limit: int = 4000):
         self._buf = []
         self._lock = threading.Lock()
         self._seq = 0
+        self._cleared_at = 0
         self.limit = limit
 
     def push(self, text: str, level: str = "info") -> int:
@@ -48,12 +56,16 @@ class LogBus:
 
     def since(self, seq: int = 0, limit: int = 800) -> tuple:
         with self._lock:
-            items = [x for x in self._buf if x["seq"] > seq]
+            floor = max(seq, self._cleared_at)
+            items = [x for x in self._buf if x["seq"] > floor]
             return items[-limit:], self._seq
 
-    def clear(self):
+    def clear(self) -> int:
+        """清空缓冲并推进水位线，返回清空时的水位线（供前端对齐游标）。"""
         with self._lock:
             self._buf.clear()
+            self._cleared_at = self._seq
+            return self._cleared_at
 
 
 class Job:
@@ -187,47 +199,11 @@ class JobManager:
         现在改为：以 pid 文件里记录的 pid 为准，递归杀掉整棵进程树。
         """
         pid_file = self._pidfile_path()
-        if not pid_file.exists():
+        pid = _read_pidfile(pid_file)
+        if not pid:
             self.log.push("未发现运行中的子进程（可能正卡在阶段切换处）", "info")
             return
-        try:
-            pid = int(pid_file.read_text(encoding="utf-8").strip().split("|")[0])
-        except Exception:
-            pid = 0
-
-        killed = False
-        try:
-            import psutil  # 可选依赖
-        except ImportError:
-            psutil = None
-
-        if psutil and pid:
-            try:
-                root = psutil.Process(pid)
-                victims = root.children(recursive=True) + [root]
-                for p in victims:
-                    try:
-                        p.kill()
-                        killed = True
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        elif pid:
-            try:
-                os.kill(pid, 9)
-                killed = True
-            except Exception:
-                pass
-        if not killed and os.name == "nt" and pid:
-            # 没有 psutil 时的兜底：taskkill /T 连同子进程树一起杀
-            try:
-                import subprocess
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                killed = True
-            except Exception:
-                pass
+        killed = _kill_pid_tree(pid, self.log)
         self.log.push("已终止当前子进程" if killed else "未能终止子进程", "warn")
         try:
             pid_file.unlink()
@@ -599,11 +575,70 @@ class JobManager:
         return d / "current_child.pid"
 
 
+def _kill_pid_tree(pid: int, log: "LogBus | None" = None) -> bool:
+    """杀掉 pid 及其派生的整棵进程树，返回是否确实杀掉过东西。
+
+    必须杀整棵树：Jasna / infer.exe 会再拉起 ffmpeg 等子进程，
+    只杀父进程的话，子进程会接着跑并继续往管道写日志 ——
+    表现为「点了停止但日志还在跳动」。
+    """
+    if not pid:
+        return False
+    try:
+        import psutil  # 可选依赖
+    except ImportError:
+        psutil = None
+
+    killed = False
+    if psutil:
+        try:
+            root = psutil.Process(pid)
+            for p in (root.children(recursive=True) + [root]):
+                try:
+                    p.kill()
+                    killed = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if not killed:
+        try:
+            os.kill(pid, 9)
+            killed = True
+        except Exception:
+            pass
+    if not killed and os.name == "nt":
+        # 没有 psutil 时的兜底：taskkill /T 连同子进程树一起杀
+        try:
+            import subprocess
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            killed = True
+        except Exception:
+            pass
+    return killed
+
+
+def _read_pidfile(pid_file) -> int:
+    """从 pid 文件读出 pid；文件不存在或内容损坏都返回 0。"""
+    try:
+        if pid_file.exists():
+            return int(pid_file.read_text(encoding="utf-8").strip().split("|")[0])
+    except Exception:
+        pass
+    return 0
+
+
 def _run_process(cmd, cwd=None, log=None, on_line=None, stop_flag=None,
                  pidfile=None, shell=False):
     """执行子进程；把 stdout/stderr 逐行输出；支持通过 pidfile 记录并终止。
 
     shell=True 时 cmd 可以是字符串（用于「导出后执行命令」这类场景）。
+
+    stop_flag 必须在这里真正生效：早先它只是个摆设参数，导致停止完全依赖
+    外部那一次性的 kill。若 kill 恰好落在阶段切换的空隙，就谁也杀不掉，
+    子进程继续跑、日志继续跳。现在改为读线程 + 主线程轮询标志位，
+    一旦置位就地终止整棵进程树并停止输出日志。
     """
     import subprocess
     if on_line:
@@ -625,20 +660,63 @@ def _run_process(cmd, cwd=None, log=None, on_line=None, stop_flag=None,
         if log:
             log.push(f"无法启动：{e}", "error")
         return 127, str(e)
+
     if pidfile and not shell:
         try:
-            pidfile.write_text(f"{proc.pid}|{' '.join(str(c) for c in cmd)}", encoding="utf-8")
+            pidfile.write_text(f"{proc.pid}|{' '.join(str(c) for c in cmd)}",
+                               encoding="utf-8")
         except Exception:
             pass
+
+    # 读线程负责搬 stdout，主线程只管取 —— 若在主线程直接 for raw in
+    # proc.stdout，读操作会阻塞在管道上，主线程就没机会去检查 stop_flag。
+    q: queue.Queue = queue.Queue()
+    _done = object()
+
+    def _reader():
+        try:
+            for raw in proc.stdout:
+                q.put(raw.decode("utf-8", errors="replace").rstrip())
+        except Exception:
+            pass
+        finally:
+            q.put(_done)
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+
     lines = []
+    aborted = False
     try:
-        for raw in proc.stdout:
-            s = raw.decode("utf-8", errors="replace").rstrip()
-            lines.append(s)
+        while True:
+            if stop_flag is not None and stop_flag.is_set() and not aborted:
+                aborted = True
+                _kill_pid_tree(proc.pid, log)
+                break
+            try:
+                item = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is _done:
+                break
+            # 停止后丢弃残余输出，避免日志继续跳动
+            if aborted or (stop_flag is not None and stop_flag.is_set()):
+                continue
+            lines.append(item)
             if on_line:
-                on_line(s)
-        proc.wait()
+                on_line(item)
+        if aborted:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+        else:
+            proc.wait()
     finally:
+        # 收尾：把读线程一并带走，避免它继续往队列里灌数据
+        stop_flag_set = stop_flag is not None and stop_flag.is_set()
+        if not stop_flag_set:
+            t.join(timeout=1)
         try:
             proc.stdout.close()
         except Exception:
@@ -648,7 +726,10 @@ def _run_process(cmd, cwd=None, log=None, on_line=None, stop_flag=None,
                 pidfile.unlink()
             except OSError:
                 pass
-    return proc.returncode, "\n".join(lines)
+    rc = proc.returncode
+    if aborted:
+        rc = rc if rc else -1
+    return rc, "\n".join(lines)
 
 
 MANAGER = JobManager()

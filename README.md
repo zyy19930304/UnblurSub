@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Self-test](https://img.shields.io/badge/selftest-376%2F376-4CAF50)
+![Self-test](https://img.shields.io/badge/selftest-433%2F433-4CAF50)
 
 **视频处理 + 中文字幕生成的 Windows 批量桌面工具。**
 
@@ -226,7 +226,7 @@ build.bat
 [2/6] 创建 / 复用 .venv 独立虚拟环境
 [3/6] 升级 pip
 [4/6] 安装 requirements.txt
-[5/6] 运行 selftest.py（376 项断言，不通过则中止打包）
+[5/6] 运行 selftest.py（433 项断言，不通过则中止打包）
 [6/6] PyInstaller onedir 打包
 ```
 
@@ -540,7 +540,7 @@ A：代码有问题导致自测不通过，打包被中止。先跑 `python self
 ## 开发与测试
 
 ```bash
-python selftest.py      # 376 项断言，不需要 GPU / 网络 / 任何外部程序
+python selftest.py      # 433 项断言，不需要 GPU / 网络 / 任何外部程序
 ```
 
 覆盖范围：
@@ -554,7 +554,7 @@ python selftest.py      # 376 项断言，不需要 GPU / 网络 / 任何外部�
 - **依赖自检**（Topaz 路径缺失、重叠帧数越界、LTX / UNet 提示）
 - **目录校验**（缺 `tools\ffmpeg.exe`、缺 `model_weights`、中文目录名各自给出对应警告）
 - **字幕侧**：命令构造、封装参数、SRT 规整、覆盖策略、配置持久化
-- **API 契约**：31 个路由注册、签名一致性、按模式的前置校验
+- **API 契约**：32 个路由注册、签名一致性、按模式的前置校验
 - **前端容错**：`undefined` 安全读取、无旧规则残留
 
 ### 项目结构
@@ -566,7 +566,7 @@ UnblurSub/
 ├── core.py             # 核心逻辑：字幕参数 schema、命名规则、扫描、封装
 ├── jasna_core.py       # Jasna 集成：参数 schema、命令构造、目录校验、依赖自检
 ├── jobs.py             # 任务队列与流水线：模式驱动的视频处理 / 字幕双流程
-├── selftest.py         # 376 项断言的自测套件（零外部依赖）
+├── selftest.py         # 433 项断言的自测套件（零外部依赖）
 ├── build.bat           # 自建 venv + 跑自测 + PyInstaller onedir 打包
 ├── requirements.txt
 └── web/                # 前端（原生 HTML/CSS/JS，无框架无构建）
@@ -580,12 +580,13 @@ UnblurSub/
 
 <details>
 
-<summary>HTTP API 一览（31 个端点）</summary>
+<summary>HTTP API 一览（32 个端点）</summary>
 
 ```
 GET  /api/state              POST /api/start
 GET  /api/job/state          POST /api/stop
 GET  /api/job/logs           POST /api/scan
+POST /api/job/logs/clear     清空日志水位线
 GET  /api/profiles           POST /api/add_folder
 GET  /api/jasna_profiles     POST /api/remove_folder
 GET  /api/drives             POST /api/set_selected

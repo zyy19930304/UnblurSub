@@ -660,6 +660,26 @@ def jasna_exe(jasna_dir: str) -> Path:
     return Path(jasna_dir or "") / "jasna.exe"
 
 
+def _is_pe_exe(path) -> bool:
+    """粗判是否为 Windows 可执行文件（查 MZ 魔数 + PE 签名）。
+
+    与 core.is_pe_exe() 同逻辑，但在本文件内独立实现——
+    jasna_core 刻意不 import core，保持可单独导入做单元测试的分层约束。
+    """
+    try:
+        with open(path, "rb") as f:
+            if f.read(2) != b"MZ":
+                return False
+            f.seek(0x3C)
+            off = f.read(4)
+            if len(off) != 4:
+                return False
+            f.seek(int.from_bytes(off, "little"))
+            return f.read(4) == b"PE\x00\x00"
+    except (OSError, ValueError):
+        return False
+
+
 def validate_jasna_dir(path: str) -> dict:
     """校验 Jasna 程序目录（含 jasna.exe / model_weights / tools）。"""
     if not path:
@@ -672,6 +692,11 @@ def validate_jasna_dir(path: str) -> dict:
     exe = jasna_exe(p)
     if not exe.exists():
         return {"ok": False, "msg": f"目录中未找到 jasna.exe：{exe}"}
+    # 同FW：挡掉「文件名对但不是可执行文件」的坏目录，
+    # 否则运行期才弹 WinError 216「与 64 位 Windows 不兼容」。
+    if not _is_pe_exe(exe):
+        return {"ok": False,
+                "msg": f"jasna.exe 不是有效的 Windows 程序（可能选错了目录）：{exe}"}
     models = p / "model_weights"
     weights = []
     if models.is_dir():

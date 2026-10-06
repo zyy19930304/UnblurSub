@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time as _time          # 供 wait_manager_idle() 使用
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -39,6 +40,58 @@ def check_true(name: str, cond, detail=""):
 
 def section(t):
     print(f"\n=== {t} ===")
+
+
+def fake_pe(path: Path):
+    """造一个**真正可执行**的占位 exe。
+
+    为什么不能只写 b"MZ"：
+    MZ 只是 DOS 头的魔数，后面没有 PE 头和机器码，Windows 认为它不是合法的
+    可执行文件，启动时抛 OSError WinError 216 ——
+    「此版本的 %1 与你运行的 Windows 版本不兼容」，并弹系统级错误框。
+    自测里凡是会真的Popen 到的 exe 都必须用本函数生成，
+    否则跑一次自测就弹一次框（打包前自检尤其明显）。
+
+    实现：直接复制一个系统自带的 64 位 exe。要求只有「Windows 能加载它」，
+    不关心它具体做什么——自测要么只校验文件存在，要么立刻 stop()。
+    手搓最小 PE 头虽可行但字段极易写错（COFF/节头的格式串与字段数对不上），
+    远不如复制真实 exe 稳妥。
+
+    注意：复制出来的 exe 可能被 worker 真的启动，
+    因此调用方必须等worker 结束再删临时目录，否则 Windows 会因
+    「文件被占用」而拒绝删除（PermissionError WinError 5）。
+    """
+    import shutil
+    # 优先级很重要：
+    #   where.exe —— 非交互式，传任何参数都立即退出，最适合当占位；
+    #   cmd.exe   —— 裸跑会进交互模式等输入，容易挂住（不能作首选）；
+    #   sys.executable —— 兜底，同样是合法 PE 且带参数即退。
+    for cand in (r"C:\Windows\System32\where.exe",
+                 sys.executable,
+                 r"C:\Windows\System32\cmd.exe"):
+        src = Path(cand)
+        if src.exists():
+            shutil.copy2(src, path)
+            return path
+    # 兜底：实在找不到可复制目标时，退回 2 字节 MZ。
+    # 此时若真的被 Popen 会抛 216，但只影响极端精简的 Windows 镜像。
+    path.write_bytes(b"MZ")
+    return path
+
+
+def wait_manager_idle(mgr, timeout=30):
+    """等 JobManager 的 worker 真正退出。
+
+    必须在删除临时目录前调用：worker 若仍在跑，复制来的占位 exe 就还开着，
+    TemporaryDirectory 清理会抛 PermissionError（WinError 5）。
+    """
+    end = _time.time() + timeout
+    while _time.time() < end:
+        with mgr._lock:
+            if not mgr._worker_active and mgr._q.empty():
+                return True
+        _time.sleep(0.05)
+    return False
 
 
 # ---------------------------------------------------------------- 1. 命名规则
@@ -324,14 +377,52 @@ with tempfile.TemporaryDirectory() as td:
     td = Path(td)
     r = core.validate_fw_dir(str(td))
     check("缺 infer.exe 不通过", r["ok"], False)
-    (td / "infer.exe").write_bytes(b"MZ")
+    fake_pe(td / "infer.exe")
     (td / "models").mkdir()
     (td / "generation_config.json5").write_text("{}", encoding="utf-8")
     r2 = core.validate_fw_dir(str(td))
     check("含 infer.exe 通过", r2["ok"], True)
     check("检测到 models", r2["has_models"], True)
     check("检测到 generation_config", r2["has_generation_config"], True)
-    check("infer_exe 拼接", core.infer_exe(str(td)).name, "infer.exe")
+    check("infer_exe拼接", core.infer_exe(str(td)).name, "infer.exe")
+
+# ---- 占位 exe 必须是真正可执行的（曾弹 WinError 216 系统框）----
+# 背景：自测原用 write_bytes(b"MZ") 造infer.exe，只有 2 字节，
+# Windows 认为不是合法可执行文件，启动时抛
+# 「此版本的 %1 与你运行的 Windows 版本不兼容」并弹系统错误框。
+with tempfile.TemporaryDirectory() as td2:
+    td2 = Path(td2)
+    _fake = fake_pe(td2 / "infer.exe")
+    check("占位 exe 不是 2 字节的 MZ", _fake.stat().st_size > 2, True)
+    check("占位 exe 通过 PE 头校验", core.is_pe_exe(_fake), True)
+    # 真启动一次，确认系统能加载（不再抛 216）。
+    #带一个必然非法的参数：where.exe 会打印错误后立刻退出，
+    # cmd.exe 会因参数不识别的报错退出 —— 两者都不会挂住等输入。
+    import subprocess as _sp
+    try:
+        _r = _sp.run([str(_fake), "--selftest-noop"], capture_output=True,
+                     timeout=20,
+                     creationflags=(_sp.CREATE_NO_WINDOW if os.name == "nt" else 0))
+        check_true("占位 exe 可被系统启动（无 WinError 216）", True, f"rc={_r.returncode}")
+    except OSError as _e:
+        # OSError WinError 216 = 「与 64 位 Windows 不兼容」，正是原 bug
+        check_true("占位 exe 可被系统启动（无 WinError 216）", False,
+                   f"WinError {getattr(_e, 'winerror', None)}: {_e}")
+    except _sp.TimeoutExpired:
+        check_true("占位 exe 可被系统启动（无 WinError 216）", False, "启动后未退出")
+
+# 非 PE 文件（纯文本）必须被 validate_fw_dir 拦下
+with tempfile.TemporaryDirectory() as td3:
+    td3 = Path(td3)
+    (td3 / "infer.exe").write_text("这不是可执行文件", encoding="utf-8")
+    check("纯文本 infer.exe 被拒绝", core.validate_fw_dir(str(td3))["ok"], False)
+    check_true("拒绝原因可读", "不是有效的Windows 程序" in
+               core.validate_fw_dir(str(td3))["msg"]
+               or "不是有效的 Windows 程序" in core.validate_fw_dir(str(td3))["msg"],
+               core.validate_fw_dir(str(td3))["msg"])
+    (td3 / "infer.exe").unlink()
+    (td3 / "infer.exe").write_bytes(b"MZ")
+    check("2 字节 MZ 的 infer.exe 被拒绝", core.validate_fw_dir(str(td3))["ok"], False)
 
 # ---------------------------------------------------------------- 10. 路由签名
 section("10. 服务路由签名一致性（防 GET/POST 调用不匹配）")
@@ -723,9 +814,9 @@ with tempfile.TemporaryDirectory() as td:
         # 伪造一个 Jasna 目录结构
         jd = Path(td) / "jasna-test"
         (jd / "model_weights").mkdir(parents=True)
+        fake_pe(jd / "jasna.exe")
         (jd / "tools").mkdir()
-        (jd / "jasna.exe").write_bytes(b"MZ")
-        (jd / "tools" / "ffmpeg.exe").write_bytes(b"MZ")
+        (jd / "tools" / "ffmpeg.exe").write_bytes(b"MZ")  # 不会被执行，仅占位
         (jd / "model_weights" / "x.onnx").write_bytes(b"x")
         _r = jasna_core.validate_jasna_dir(str(jd))
         check("伪造目录校验通过", _r["ok"], True)
@@ -744,7 +835,7 @@ with tempfile.TemporaryDirectory() as td:
         # 中文目录名应提示（Jasna 官方要求纯英文路径）
         cn = Path(td) / "中文目录jasna"
         cn.mkdir()
-        (cn / "jasna.exe").write_bytes(b"MZ")
+        fake_pe(cn / "jasna.exe")
         _r = jasna_core.validate_jasna_dir(str(cn))
         check_true("中文目录名给出提示", "英文" in _r["warn"], _r["warn"])
 
@@ -811,7 +902,7 @@ with tempfile.TemporaryDirectory() as td:
         # 伪造一个可用的 FW 目录，让校验通过，从而单独验证「空列表」这一项
         fwd = Path(td) / "fw-test"
         fwd.mkdir()
-        (fwd / "infer.exe").write_bytes(b"MZ")
+        fake_pe(fwd / "infer.exe")
         core.save_settings({"mode": 2, "jasna_dir": "", "fw_dir": str(fwd)})
         try:
             _srv.api_start({"paths": [], "mode": 2}, None)
@@ -823,6 +914,9 @@ with tempfile.TemporaryDirectory() as td:
                              "params": core.default_params()}, None)
         check("模式2 无需 Jasna 即可提交", len(_r["jobs"]), 1)
         _srv.MANAGER.stop(True)
+        # 必须等 worker 真正退出：fw-test\infer.exe 可能正被占用，
+        # 不等就删临时目录会抛 PermissionError（WinError 5 文件被占用）。
+        wait_manager_idle(_srv.MANAGER)
 
         # ---- 预览命令按模式给出不同命令链 ----
         core.save_settings({"mode": 1, "jasna_dir": str(jd), "fw_dir": "D:/fw_dummy"})
@@ -1017,6 +1111,202 @@ with tempfile.TemporaryDirectory() as td:
             os.environ.pop("APPDATA", None)
         else:
             os.environ["APPDATA"] = old_app
+
+# ------------------------------------------- 20. 日志停止与清空（曾日志跳动 / 清空后回魂）
+section("20. 日志停止与清空")
+
+_jobs_src2 = Path(_jobs_mod.__file__).read_text(encoding="utf-8")
+import threading  # noqa: E402  （第 20 节要用，文件头部未导入）
+
+# --- 结构性：stop_flag 必须真被用到，且不能再是摆设 ---
+check("_run_process 真正使用 stop_flag",
+      "stop_flag.is_set()" in _jobs_src2, True)
+check("_run_process 用读线程+队列消费 stdout（主线程才能查停止标志）",
+      "q.get(timeout=0.2)" in _jobs_src2, True)
+check("停止后就地终止进程树", "_kill_pid_tree(proc.pid" in _jobs_src2, True)
+check("停止后丢弃残余输出（日志不再跳动）",
+      "if aborted or (stop_flag is not None and stop_flag.is_set()):" in _jobs_src2, True)
+check("有共用的 _kill_pid_tree", "def _kill_pid_tree(" in _jobs_src2, True)
+check("_kill_current 复用共用函数", "_kill_pid_tree(pid" in _jobs_src2, True)
+
+# --- LogBus 水位线：清空后旧日志不得回魂 ---
+_lb = _jobs_mod.LogBus(limit=50)
+for _i in range(5):
+    _lb.push(f"old-{_i}")
+check("清空前能取到 5 行", len(_lb.since(0)[0]), 5)
+_ca = _lb.clear()
+check("clear() 返回水位线", _ca, 5)
+check("清空后按水位线取：0 行", len(_lb.since(_ca)[0]), 0)
+check("清空后前端漏推游标也是 0 行（后端兜底）", len(_lb.since(0)[0]), 0)
+_lb.push("new-1")
+_lb.push("new-2")
+check("清空后新日志可正常写入",
+      [x["text"] for x in _lb.since(_ca)[0]], ["new-1", "new-2"])
+# 水位线必须只增不减，防止有人用旧游标把历史翻出来
+_lb2 = _jobs_mod.LogBus(limit=10)
+_lb2.push("x")
+_c1 = _lb2.clear()
+_lb2.push("y")
+_lb2.clear()
+check("连续两次清空水位线递增", _c1 < _lb2._cleared_at, True)
+check("连续清空后取不到任何行", len(_lb2.since(0)[0]), 0)
+
+# --- 停止后子进程必须死、且零输出 ---
+with tempfile.TemporaryDirectory() as td:
+    old_app2 = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td
+    try:
+        _m5 = _jobs_mod.JobManager()
+        _sf = threading.Event()
+        _cap = []
+        _code = ("import sys,time\n"
+                 "for i in range(200):\n"
+                 "    print('tick', i, flush=True)\n"
+                 "    time.sleep(0.05)\n")
+
+        def _run():
+            _jobs_mod._run_process([sys.executable, "-u", "-c", _code],
+                                   log=_m5.log, stop_flag=_sf,
+                                   on_line=_cap.append,
+                                   pidfile=_m5._pidfile_path())
+
+        _th = threading.Thread(target=_run, daemon=True)
+        _th.start()
+        _time.sleep(1.0)
+        _pid = 0
+        try:
+            _pid = int(_m5._pidfile_path().read_text(encoding="utf-8").split("|")[0])
+        except Exception:
+            pass
+        _n_before = len([x for x in _cap if x.startswith("tick")])
+        _t0 = _time.time()
+        _sf.set()
+        _m5._kill_current()
+        _th.join(timeout=10)
+        _dt = _time.time() - _t0
+        _time.sleep(0.5)
+        _n_after = len([x for x in _cap if x.startswith("tick")])
+        check_true("停止响应及时（< 3s）", _dt < 3.0, f"{_dt:.2f}s")
+        check("停止后子进程零新增输出（日志不跳动）",
+              _n_after - _n_before, 0)
+        _alive = False
+        if _pid:
+            try:
+                import psutil
+                _alive = psutil.Process(_pid).is_running() and \
+                    psutil.Process(_pid).status() != psutil.STATUS_ZOMBIE
+            except Exception:
+                _alive = False
+        check("停止后子进程已终止", _alive, False)
+    finally:
+        if old_app2 is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app2
+
+# --- HTTP 接口 ---
+with tempfile.TemporaryDirectory() as td:
+    old_app3 = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td
+    try:
+        check("清空日志路由已注册", "/api/job/logs/clear" in _srv.ROUTES, True)
+        _jobs_mod.MANAGER.log.clear()
+        for _i in range(3):
+            _jobs_mod.MANAGER.log.push(f"L{_i}")
+        _r = _srv.api_job_logs({"since": ["0"]}, {"since": ["0"]})
+        check("接口能取到日志", len(_r["lines"]), 3)
+        _rc = _srv.api_job_logs_clear(None, None)
+        check("清空接口返回 cleared_at", "cleared_at" in _rc, True)
+        check("cleared_at 等于当前 seq", _rc["cleared_at"], _r["seq"])
+        _r2 = _srv.api_job_logs({"since": ["0"]}, {"since": ["0"]})
+        check("清空后接口不再返回旧行", len(_r2["lines"]), 0)
+    finally:
+        if old_app3 is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app3
+
+# --- 前端契约 ---
+_js2 = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+check("前端有 clearLog() 函数", "function clearLog(" in _js2, True)
+check("清空按钮改调 clearLog", "$('#btnClearLog').onclick = clearLog" in _js2, True)
+check("清空按钮不再只清 DOM",
+      "$('#btnClearLog').onclick = () => { $('#logBox').innerHTML = ''; }" not in _js2, True)
+check("前端按后端水位线对齐游标", "S.logSeq = r.cleared_at || 0" in _js2, True)
+check("前端有日志世代号", "logGen: 0" in _js2, True)
+check("清空时推进世代号", "S.logGen++" in _js2, True)
+check("轮询带世代号守卫（在途响应作废）",
+      "if (gen !== S.logGen)" in _js2, True)
+check("无新行时也推进游标",
+      "} else if (lg.seq != null) {" in _js2, True)
+check("start() 后回退游标到新水位线",
+      "if (lg && lg.seq != null) S.logSeq = lg.seq;" in _js2, True)
+
+# ------------------------------------------- 21. 处理模式持久化（曾关闭时存不下来）
+section("21. 处理模式持久化")
+
+with tempfile.TemporaryDirectory() as td:
+    old_app4 = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td
+    try:
+        # --- 后端：mode 能落盘并读回，非法值被归一化 ---
+        for _m in (1, 3, 2):
+            core.save_settings({"mode": _m})
+            check(f"mode={_m} 落盘后读回", core.load_settings().get("mode"), _m)
+        core.save_settings({"mode": 9})
+        check("非法 mode=9 归一化为 2", core.load_settings().get("mode"), 2)
+        core.save_settings({"mode": "abc"})
+        check("非法 mode='abc' 归一化为 2", core.load_settings().get("mode"), 2)
+
+        # --- 关闭流程（api_shutdown_prompt）必须写 mode ---
+        for _m in (1, 3, 2):
+            _srv.api_shutdown_prompt({"settings": {"mode": _m}}, None)
+            check(f"shutdown_prompt 保存 mode={_m}",
+                  core.load_settings().get("mode"), _m)
+
+        # --- 完整往返：切模式 -> 关闭 -> 重开，且不误清空其他设置 ---
+        core.save_settings({"mode": 2, "fw_dir": "D:/keep_me",
+                            "video_exts": ["mp4", "mkv"]})
+        _srv.api_save_settings({"mode": 1}, None)      # 前端 setMode 的落盘
+        _srv.api_shutdown_prompt({"settings": {"mode": 1}}, None)  # 关闭兜底
+        _st3 = core.load_settings()
+        check("重开恢复为上次退出的模式", _st3.get("mode"), 1)
+        check("往返后 fw_dir 未被误清空", _st3.get("fw_dir"), "D:/keep_me")
+        check("往返后 video_exts 未被误清空", _st3.get("video_exts"), ["mp4", "mkv"])
+        check("启动读取的 mode 合法",
+              jasna_core.normalize_mode(_st3.get("mode")), 1)
+    finally:
+        if old_app4 is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app4
+
+# --- 前端契约：三处都要持久化 mode ---
+_js3 = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+_i3 = _js3.find("function setMode(")
+_k3 = _js3.find("function applyMode(")
+_sm = _js3[_i3:_k3] if _i3 >= 0 and _k3 > _i3 else ""
+check("存在 setMode()", _i3 >= 0, True)
+check("setMode 立即落盘 mode",
+      "api('/api/save_settings', { mode: S.mode })" in _sm, True)
+check("setMode 校验模式合法性", "MODE_META[v]" in _sm, True)
+# 不能复用 saveSettings()：它从设置弹窗 DOM 读值，弹窗未开过时会把配置清空
+_sm_code = "\n".join(l for l in _sm.splitlines()
+                     if not l.strip().startswith(("//", "*", "/*")))
+check("setMode 不复用 saveSettings（避免清空 fw_dir 等）",
+      "saveSettings(" not in _sm_code, True)
+
+_j3 = _js3.find("async function doQuit(")
+_q3 = _js3[_j3:_j3 + 700] if _j3 >= 0 else ""
+check("存在 doQuit()", _j3 >= 0, True)
+check("doQuit 的 patch 含 mode", "mode: S.mode," in _q3, True)
+
+_k4 = _js3.find("async function finishQuit(")
+_f3 = _js3[_k4:_k4 + 1400] if _k4 >= 0 else ""
+check("存在 finishQuit()", _k4 >= 0, True)
+check("finishQuit 用内存 S.mode 落盘", "mode: S.mode," in _f3, True)
+check("finishQuit 不再读可能过期的 cfg('mode')",
+      "mode: cfg('mode', 2)" not in _f3, True)
 
 # ---------------------------------------------------------------- 汇总
 print("\n" + "=" * 56)
