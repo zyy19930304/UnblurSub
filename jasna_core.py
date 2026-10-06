@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Jasna（马赛克去除）集成层：参数 schema、命令构造、目录校验。
+"""Jasna（视频处理）集成层：参数 schema、命令构造、目录校验。
 
 与字幕模块平行设计，遵循同样的约定：
   - 不依赖任何界面 / 网络库，可单独 import 做单元测试
@@ -17,7 +17,7 @@ from pathlib import Path
 # --------------------------------------------------------------------------
 # 处理模式
 # --------------------------------------------------------------------------
-# 1 = 只清除马赛克   -> 输出 -U
+# 1 = 只做视频处理   -> 输出 -U
 # 2 = 只生成中文字幕 -> 输出 -C
 # 3 = 两者都做        -> 输出 -UC
 
@@ -26,15 +26,15 @@ MODE_SUBTITLE = 2
 MODE_BOTH = 3
 
 MODES = [
-    {"value": MODE_UNBLUR, "key": "unblur", "label": "只清除马赛克",
-     "short": "去马赛克", "suffix": "-U",
-     "desc": "调用 Jasna 去除马赛克，输出文件名加 -U 后缀"},
+    {"value": MODE_UNBLUR, "key": "unblur", "label": "只做视频处理",
+     "short": "视频处理", "suffix": "-U",
+     "desc": "调用 Jasna 处理视频，输出文件名加 -U 后缀"},
     {"value": MODE_SUBTITLE, "key": "subtitle", "label": "只生成中文字幕",
      "short": "加字幕", "suffix": "-C",
      "desc": "调用 Faster Whisper 生成中文字幕并软封装，输出文件名加 -C 后缀"},
-    {"value": MODE_BOTH, "key": "both", "label": "清除马赛克 + 生成中文字幕",
-     "short": "去马赛克+字幕", "suffix": "-UC",
-     "desc": "先去马赛克，再生成中文字幕，输出文件名加 -UC 后缀"},
+    {"value": MODE_BOTH, "key": "both", "label": "视频处理 + 生成中文字幕",
+     "short": "视频处理+字幕", "suffix": "-UC",
+     "desc": "先做视频处理，再生成中文字幕，输出文件名加 -UC 后缀"},
 ]
 MODE_VALUES = [m["value"] for m in MODES]
 MODE_BY_VALUE = {m["value"]: m for m in MODES}
@@ -52,7 +52,7 @@ def normalize_mode(mode) -> int:
 # --------------------------------------------------------------------------
 # 命名规则（随模式变化）
 # --------------------------------------------------------------------------
-# 后缀语义：-U = 已去马赛克，-C = 已加中文字幕，-UC = 两者都有
+# 后缀语义：-U = 已完成视频处理，-C = 已加中文字幕，-UC = 两者都有
 
 def processed_flags(stem: str) -> dict:
     """解析文件名后缀，判断该文件已经做过哪些处理。
@@ -75,10 +75,10 @@ def processed_flags(stem: str) -> dict:
 def target_stem_mode(stem: str, mode: int) -> str:
     """按处理模式计算输出文件名（不含扩展名）。
 
-    模式 1（只去马赛克）：加 -U；原名以 -C 结尾 -> 把 -C 换成 -UC
+    模式 1（只视频处理）：加 -U；原名以 -C 结尾 -> 把 -C 换成 -UC
         ABC     -> ABC-U
         ABC-C   -> ABC-UC
-        ABC-U   -> ABC-U     （已去马赛克，模式 1 下会被跳过，此处仅兜底）
+        ABC-U   -> ABC-U     （已完成视频处理，模式 1 下会被跳过，此处仅兜底）
     模式 2（只加字幕）：加 -C；原名以 -U 结尾 -> 把 -U 换成 -UC
         ABC     -> ABC-C
         ABC-U   -> ABC-UC
@@ -88,7 +88,7 @@ def target_stem_mode(stem: str, mode: int) -> str:
     m = normalize_mode(mode)
     flags = processed_flags(stem)
     if m == MODE_UNBLUR:
-        # 已去过的马赛克不能再加 -U；原名是 -C 产物则升级为 -UC
+        # 已处理过的视频不能再加 -U；原名是 -C 产物则升级为 -UC
         if flags["c"]:
             return _swap_suffix(stem, "-UC")
         return stem + "-U"
@@ -115,7 +115,7 @@ def _swap_suffix(stem: str, new_suffix: str) -> str:
 def should_skip(stem: str, mode: int) -> bool:
     """按模式判断该文件是否应跳过（已处理过 / 无法再处理）。
 
-    模式 1（只去马赛克）：已去马赛克的（-U / -UC）跳过
+    模式 1（只做视频处理）：已完成视频处理的（-U / -UC）跳过
     模式 2（只加字幕）：已加字幕的（-C / -UC）跳过
     模式 3（两者都做）：已做过任意一项的（-U / -C / -UC）都跳过，
              因为两个产物合起来就是 -UC，无法在已处理文件上再叠加
@@ -137,15 +137,15 @@ def skip_reason(stem: str, mode: int) -> str:
     m = normalize_mode(mode)
     have = []
     if f["u"]:
-        have.append("已去马赛克")
+        have.append("已完成视频处理")
     if f["c"]:
         have.append("已加中文字幕")
     done = "、".join(have)
     if m == MODE_UNBLUR:
-        return f"文件名后缀表明{done}，模式「只清除马赛克」无需重复处理"
+        return f"文件名后缀表明{done}，模式「只做视频处理」无需重复处理"
     if m == MODE_SUBTITLE:
         return f"文件名后缀表明{done}，模式「只生成中文字幕」无需重复处理"
-    return f"文件名后缀表明{done}，模式「清除马赛克 + 生成中文字幕」需两者都未处理过"
+    return f"文件名后缀表明{done}，模式「视频处理 + 生成中文字幕」需两者都未处理过"
 
 
 def auto_selected_mode(stem: str, mode: int, rule: str = "smart") -> bool:
@@ -190,10 +190,10 @@ JASNA_PARAM_SCHEMA = [
          arg="--ltx-fast", when="true", group="修复模型",
          depends_on="restoration_model:ltx", need="rtx50",
          help="约快 1.4 倍，细节略少。仅限 RTX 50 系列。"),
-    dict(key="ltx_large_canvas", label="LTX 大马赛克更清晰", type="bool", default=False,
+    dict(key="ltx_large_canvas", label="LTX 大面积区域更清晰", type="bool", default=False,
          arg="--ltx-large-canvas", when="true", group="修复模型",
          depends_on="restoration_model:ltx", need="vram10g",
-         help="大马赛克修复得更细致，但这些部分约慢 3 倍。需要至少 10 GB 可用显存。"),
+         help="大块区域处理得更细致，但这些部分约慢 3 倍。需要至少 10 GB 可用显存。"),
     dict(key="ltx_trial", label="LTX 试运行（无需许可证，画面不正确）", type="bool",
          default=False, arg="--ltx-trial", when="true", group="修复模型",
          depends_on="restoration_model:ltx",
@@ -247,17 +247,17 @@ JASNA_PARAM_SCHEMA = [
               "片段 90 → 8-12，片段 180 → 15-20。"),
     dict(key="max_detection_gap", label="最大检测间隙", type="int", default=2,
          range=(0, 10, 1), arg="--max-detection-gap", when="nonempty", group="高级处理",
-         help="填补短暂的检测中断：如果被跟踪的马赛克消失不超过 N 帧且在相同位置重新出现，"
+         help="填补短暂的检测中断：如果被跟踪的目标消失不超过 N 帧且在相同位置重新出现，"
               "则填补间隙并继续该片段，而不是将其切断。保持较小数值，"
               "以免真正快速出现/消失的画面被错误填补。0 表示禁用。"),
     dict(key="min_detection_duration", label="最短检测持续帧数", type="int", default=2,
          range=(0, 10, 1), arg="--min-detection-duration", when="nonempty", group="高级处理",
          help="丢弃持续少于 N 帧的检测（很可能是单帧误检），这些帧保持原样。"
-              "保持较小数值，否则真实存在但只持续几帧的马赛克会被跳过。0 或 1 表示禁用。"),
+              "保持较小数值，否则真实存在但只持续几帧的目标会被跳过。0 或 1 表示禁用。"),
     dict(key="scene_detection", label="镜头切换检测", type="bool", default=True,
          arg="--scene-detection", when="true", group="高级处理",
-         help="检测硬切镜头（场景切换），并在切换点结束所有正在跟踪的马赛克片段，"
-              "确保片段不会跨越两个不同镜头，避免修复时混合切换前后的画面。推荐始终开启。"),
+         help="检测硬切镜头（场景切换），并在切换点结束所有正在跟踪的处理片段，"
+              "确保片段不会跨越两个不同镜头，避免处理时混合切换前后的画面。推荐始终开启。"),
     dict(key="enable_crossfade", label="启用交叉淡入淡出", type="bool", default=True,
          arg="--enable-crossfade", when="true", group="高级处理",
          help="在片段边界处进行平滑过渡，减少画面闪烁。使用已处理的帧，"
@@ -359,8 +359,8 @@ JASNA_PARAM_SCHEMA = [
                         "h264": "H.264 (AVC)（兼容性最好，文件较大）",
                         "av1": "AV1（压缩率最高，需较新播放器与显卡）"},
          arg="--codec", when="always", group="编码输出",
-         help="输出视频格式。注意 Jasna 去除马赛克需要重新编码（不能像字幕那样 copy），"
-              "这是去马赛克的固有代价。"),
+         help="输出视频格式。注意 Jasna 的 AI 处理需要重新编码（不能像字幕那样 copy），"
+              "这是视频处理的固有代价。"),
     dict(key="encoder_cq", label="质量 (CQ)", type="int", default="",
          range=(1, 63, 1), arg="--cq", when="nonempty", group="编码输出",
          placeholder="留空 = 用 GPU 默认值（NVIDIA：H.264 25 / HEVC 28 / AV1 35）",
@@ -574,7 +574,7 @@ def builtin_jasna_profiles() -> dict:
         "动画 / 2D（YOLO 检测）": mk(
             max_clip_size=90, temporal_overlap=8, codec="hevc",
             detection_model="lada-yolov8s", detection_score_threshold=0.25,
-            help="Lada YOLO 检测模型对 2D 动画的马赛克定位更准，推荐阈值 0.25。"
+            help="Lada YOLO 检测模型对 2D 动画画面中的目标定位更准，推荐阈值 0.25。"
                  "需确保 model_weights 下有对应权重。"),
     }
 
@@ -766,7 +766,7 @@ def check_jasna_dependencies(params: dict) -> list:
     if p.get("ltx_fast"):
         out.append({"level": "warn", "text": "LTX 快速模式仅限 RTX 50 系列显卡。"})
     if p.get("ltx_large_canvas"):
-        out.append({"level": "warn", "text": "LTX 大马赛克模式需要至少 10 GB 可用显存。"})
+        out.append({"level": "warn", "text": "LTX 大面积区域模式需要至少 10 GB 可用显存。"})
     if p.get("compile_basicvsrpp"):
         out.append({"level": "warn",
                     "text": "首次运行会为当前显卡编译 TensorRT 引擎，需 15-60 分钟，"

@@ -42,9 +42,9 @@ def section(t):
 
 
 # ---------------------------------------------------------------- 1. 命名规则
-section("1. 输出文件命名规则（随处理模式变化：-U=已去马赛克 -C=已加字幕 -UC=两者）")
+section("1. 输出文件命名规则（随处理模式变化：-U=已完成视频处理 -C=已加字幕 -UC=两者）")
 
-# 模式 1：只清除马赛克 -> 加 -U；原名 -C 结尾则升级为 -UC
+# 模式 1：只做视频处理 -> 加 -U；原名 -C 结尾则升级为 -UC
 check("模式1 ABC -> ABC-U", core.target_stem("ABC", 1), "ABC-U")
 check("模式1 ABC-C -> ABC-UC", core.target_stem("ABC-C", 1), "ABC-UC")
 check("模式1 ABC-C -> ABC-UC", core.target_stem("ABC-C", 1), "ABC-UC")
@@ -76,10 +76,10 @@ check("parsed: 小写 abc-uc", jasna_core.processed_flags("abc-uc"), {"u": True,
 
 # ---------------------------------------------------------------- 2. 跳过与自动勾选
 section("2. 按模式跳过规则与自动勾选")
-# 模式 1：已去马赛克的跳过
+# 模式 1：已完成视频处理的跳过
 check("模式1 ABC 不跳过", jasna_core.should_skip("ABC", 1), False)
-check("模式1 ABC-C 不跳过（还能去马赛克）", jasna_core.should_skip("ABC-C", 1), False)
-check("模式1 ABC-U 跳过（已去马赛克）", jasna_core.should_skip("ABC-U", 1), True)
+check("模式1 ABC-C 不跳过（还能视频处理）", jasna_core.should_skip("ABC-C", 1), False)
+check("模式1 ABC-U 跳过（已完成视频处理）", jasna_core.should_skip("ABC-U", 1), True)
 check("模式1 ABC-UC 跳过", jasna_core.should_skip("ABC-UC", 1), True)
 # 模式 2：已加字幕的跳过
 check("模式2 ABC 不跳过", jasna_core.should_skip("ABC", 2), False)
@@ -93,8 +93,8 @@ check("模式3 ABC-C 跳过", jasna_core.should_skip("ABC-C", 3), True)
 check("模式3 ABC-UC 跳过", jasna_core.should_skip("ABC-UC", 3), True)
 
 check_true("跳过原因为空（不跳过时）", jasna_core.skip_reason("ABC", 1) == "")
-check_true("模式1 跳过原因含「已去马赛克」",
-           "已去马赛克" in jasna_core.skip_reason("ABC-U", 1))
+check_true("模式1 跳过原因含「已完成视频处理」",
+           "已完成视频处理" in jasna_core.skip_reason("ABC-U", 1))
 check_true("模式2 跳过原因含「已加中文字幕」",
            "已加中文字幕" in jasna_core.skip_reason("ABC-C", 2))
 check_true("模式3 跳过原因非空", jasna_core.skip_reason("ABC-U", 3) != "")
@@ -596,7 +596,7 @@ with tempfile.TemporaryDirectory() as td:
             os.environ["APPDATA"] = old
 
 # ================================================================
-# 14. Jasna 集成（去马赛克模块）
+# 14. Jasna 集成（视频处理模块）
 # ================================================================
 section("14. Jasna 参数 schema 与内置配置")
 check("JASNA schema 项数 >= 35", len(jasna_core.JASNA_PARAM_SCHEMA) >= 35, True)

@@ -72,7 +72,7 @@ DEFAULT_SETTINGS = {
     "existing_output_policy": "number",  # number / skip / overwrite
     "output_dir": "",             # 新视频输出目录，留空 = 与源文件同目录
     "keep_srt": True,             # 封装后保留中间 SRT
-    "keep_intermediate": False,   # 保留模式 3 的中间视频（去马赛克后、加字幕前）
+    "keep_intermediate": False,   # 保留模式 3 的中间视频（视频处理后、加字幕前）
     "close_prompt": True,         # 关闭时提示保存未保存的参数配置
     "_auto_select": True,         # 是否按规则自动勾选（用户手动改过则为 False）
     "_rule_version": RULE_VERSION,  # 已应用规则的版本，见 RULE_VERSION
@@ -473,7 +473,7 @@ def ffmpeg_broken_pipe_fix(path: str) -> list:
 # --------------------------------------------------------------------------
 # 命名规则
 # --------------------------------------------------------------------------
-# 后缀语义：-U = 已去马赛克，-C = 已加中文字幕，-UC = 两者都有
+# 后缀语义：-U = 已完成视频处理，-C = 已加中文字幕，-UC = 两者都有
 # 具体规则与模式判定见 jasna_core（命名随处理模式变化，此处只做薄封装）
 
 def target_stem(stem: str, mode: int = jasna_core.MODE_SUBTITLE) -> str:

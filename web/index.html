@@ -115,7 +115,7 @@
       <!-- Tab 2：Jasna 参数 -->
       <div class="tab-pane" id="paneJasna">
         <div class="pane-head">
-          <h2>2 · Jasna 去马赛克参数配置</h2>
+          <h2>2 · Jasna 视频处理参数配置</h2>
           <div class="pane-head-actions">
             <span id="jasnaDirtyDot" class="dirty hidden" title="当前参数已修改但未保存为配置">● 未保存</span>
           </div>
@@ -172,7 +172,7 @@
     <div class="modal-head"><h3>⚙ 设置</h3><button class="modal-x" data-close>✕</button></div>
     <div class="modal-body">
       <label class="fld">
-        <span>Jasna 程序目录（须含 jasna.exe，用于清除马赛克）</span>
+        <span>Jasna 程序目录（须含 jasna.exe，用于视频处理）</span>
         <div class="row">
           <input id="inpJasnaDir" type="text" spellcheck="false" placeholder="D:\...\jasna-windows-0.10.0">
           <button id="btnJasnaBrowse" class="btn tiny">浏览…</button>
@@ -220,17 +220,17 @@
         <input id="inpExts" type="text" spellcheck="false">
       </label>
       <label class="fld inline"><input type="checkbox" id="chkKeepIntermediate">
-        <span>保留中间视频（模式 3：去马赛克后、加字幕前的文件）</span></label>
+        <span>保留中间视频（模式 3：视频处理后、加字幕前的文件）</span></label>
       <em class="msg tip">中间视频写在临时工作目录里，完成后自动删除。勾选后会移动到源文件所在文件夹，便于中途人工检查效果。失败时不会保留。</em>
       <label class="fld inline"><input type="checkbox" id="chkClosePrompt" checked>
         <span>关闭程序时，若参数已修改则提示是否保存为新配置</span></label>
       <div class="naming-note">
-        <b>命名规则</b>（后缀含义：<code>-U</code> 已去马赛克、<code>-C</code> 已加中文字幕、<code>-UC</code> 两者都有）<br>
-        · 模式 1（只去马赛克）：<code>原名-U</code>；原名以 <code>-C</code> 结尾则改为 <code>原名-UC</code><br>
+        <b>命名规则</b>（后缀含义：<code>-U</code> 已完成视频处理、<code>-C</code> 已加中文字幕、<code>-UC</code> 两者都有）<br>
+        · 模式 1（只视频处理）：<code>原名-U</code>；原名以 <code>-C</code> 结尾则改为 <code>原名-UC</code><br>
         · 模式 2（只加字幕）：<code>原名-C</code>；原名以 <code>-U</code> 结尾则改为 <code>原名-UC</code><br>
         · 模式 3（两者都做）：<code>原名-UC</code>；原名已带 <code>-C</code> 或 <code>-U</code> 时<b>自动跳过</b><br>
         字幕轨道名固定为 <b>中文字幕</b>，视频与音频流直接 copy 不重新编码；
-        <b>但去马赛克必须重新编码</b>（AI 修复无法通过 copy 完成），耗时与体积开销由此产生。
+        <b>但视频处理必须重新编码</b>（AI 处理无法通过 copy 完成），耗时与体积开销由此产生。
       </div>
     </div>
     <div class="modal-foot">

@@ -104,9 +104,9 @@ async function boot() {
 
 /* ---------------- 处理模式 ---------------- */
 const MODE_META = {
-  1: { label: '只清除马赛克', short: '去马赛克', suffix: '-U', needJasna: true, needSub: false },
+  1: { label: '只做视频处理', short: '视频处理', suffix: '-U', needJasna: true, needSub: false },
   2: { label: '只生成中文字幕', short: '加字幕', suffix: '-C', needJasna: false, needSub: true },
-  3: { label: '清除马赛克 + 生成中文字幕', short: '去马赛克+字幕', suffix: '-UC', needJasna: true, needSub: true },
+  3: { label: '视频处理 + 生成中文字幕', short: '视频处理+字幕', suffix: '-UC', needJasna: true, needSub: true },
 };
 function modeMeta(m) { return MODE_META[Number(m)] || MODE_META[2]; }
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""任务队列与处理流水线：按处理模式执行「去马赛克」与/或「中文字幕」。
+"""任务队列与处理流水线：按处理模式执行「视频处理」与/或「中文字幕」。
 
 三种模式：
-  1只清除马赛克   —— jasna.exe 修复 -> 输出 -U
+  1只做视频处理   —— jasna.exe 修复 -> 输出 -U
   2 只生成中文字幕 —— infer.exe 转录 -> ffmpeg -c copy 封装 -> 输出 -C
   3 两者都做       —— jasna.exe 修复到中间文件 -> 转录 -> 封装 -> 输出 -UC
                      中间文件按设置（keep_intermediate）决定是否保留
@@ -375,7 +375,7 @@ class JobManager:
 
         self.log.push(f"▶ [{job.index}] {src.name}（{jasna_core.MODE_BY_VALUE[mode]['label']}）")
 
-        # ----------阶段 1：去马赛克（模式 1 / 3） ----------
+        # ----------阶段 1：视频处理（模式 1 / 3） ----------
         video_in = src
         if need_jasna:
             video_in = self._stage_unblur(job, src, dst, wd)
@@ -394,9 +394,9 @@ class JobManager:
                       f"（{core.human_size(dst.stat().st_size)}，{mode_label}完成）", "ok")
         return wd
 
-    # ---- 阶段 1：Jasna 去马赛克 ----
+    # ---- 阶段 1：Jasna 视频处理 ----
     def _stage_unblur(self, job: Job, src: Path, dst: Path, wd: Path) -> Path:
-        """调用 jasna.exe 去马赛克。返回去马赛克后的视频路径。
+        """调用 jasna.exe 视频处理。返回视频处理后的视频路径。
 
         模式 1：直接输出到最终 dst。
         模式 3：输出到工作目录作为中间文件，交给阶段 2 加字幕。
@@ -410,8 +410,8 @@ class JobManager:
             # 中间文件放工作目录，避免污染源目录
             target = wd / f"{dst.stem}.{self._jasna_ext()}"
 
-        job.stage = "去马赛克中"
-        # 模式 3 里去马赛克约占 70% 工期（后面转录+封装占 30%）
+        job.stage = "视频处理中"
+        # 模式 3 里视频处理约占 70% 工期（后面转录+封装占 30%）
         base, span = (2, 68) if not is_final else (2, 96)
         job.progress = base
         args = jasna_core.build_jasna_args(job.jasna_params, src, target, wd)
@@ -435,11 +435,11 @@ class JobManager:
                                on_line=on_line, stop_flag=self._stop,
                                pidfile=self._pidfile_path())
         if rc != 0 or self._stop.is_set():
-            raise RuntimeError(f"去马赛克失败（退出码 {rc}），详见日志")
+            raise RuntimeError(f"视频处理失败（退出码 {rc}），详见日志")
         if not target.exists() or target.stat().st_size == 0:
-            raise RuntimeError(f"去马赛克未产出有效文件：{target.name}")
+            raise RuntimeError(f"视频处理未产出有效文件：{target.name}")
         job.progress = base + span
-        self.log.push(f"  去马赛克完成 → {target.name}"
+        self.log.push(f"  视频处理完成 → {target.name}"
                       f"（{core.human_size(target.stat().st_size)}）", "ok")
         if not is_final:
             job.intermediate = target
