@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import core
+import jasna_core
 from jobs import MANAGER
 
 WEB_DIR = (Path(sys._MEIPASS) / "web" if getattr(sys, "frozen", False)
@@ -32,11 +33,20 @@ def _fw_ready() -> bool:
     return bool(st.get("fw_dir")) and core.infer_exe(st["fw_dir"]).exists()
 
 
+def _jasna_ready() -> bool:
+    st = core.load_settings()
+    return bool(st.get("jasna_dir")) and jasna_core.jasna_exe(st["jasna_dir"]).exists()
+
+
 def api_state(_body, _q):
     st = core.load_settings()
     profiles = core.all_profiles()
     last = st.get("last_profile") or ""
     baseline = profiles.get(last, {}).get("params") if last else core.default_params()
+    jprofiles = jasna_core.all_jasna_profiles()
+    jlast = st.get("last_jasna_profile") or ""
+    jbaseline = (jprofiles.get(jlast, {}).get("params") if jlast
+                 else jasna_core.jasna_default_params())
     return {
         "settings": st,
         "profiles": [{"name": k, **v} for k, v in profiles.items()],
@@ -45,27 +55,122 @@ def api_state(_body, _q):
         "defaults": core.default_params(),
         "baseline": baseline,
         "baseline_name": last,
+        "jasna_profiles": [{"name": k, **v} for k, v in jprofiles.items()],
+        "jasna_schema": jasna_core.JASNA_PARAM_SCHEMA,
+        "jasna_groups": jasna_core.JASNA_PARAM_GROUPS,
+        "jasna_defaults": jasna_core.jasna_default_params(),
+        "jasna_baseline": jbaseline,
+        "jasna_baseline_name": jlast,
+        "modes": jasna_core.MODES,
         "fw": core.validate_fw_dir(st.get("fw_dir", "")),
+        "jasna": jasna_core.validate_jasna_dir(st.get("jasna_dir", "")),
         "ffmpeg": core.find_ffmpeg(st),
         "job": MANAGER.state(),
-        "app": {"name": core.APP_TITLE, "version": "1.0.0"},
+        "app": {"name": core.APP_TITLE, "version": "2.0.0"},
     }
 
 
 def api_save_settings(body, _q):
     patch = {k: v for k, v in (body or {}).items() if k in core.DEFAULT_SETTINGS}
-    if "fw_dir" in patch and patch["fw_dir"]:
-        patch["fw_dir"] = str(Path(patch["fw_dir"]).expanduser())
-    # 自动勾选规则变了，旧的勾选记录是按老规则算的，必须清掉重算
-    if "auto_select_rule" in patch:
-        prev = core.load_settings().get("auto_select_rule")
-        if prev != patch["auto_select_rule"]:
-            patch["selected"] = {}
-            patch["_auto_select"] = True
+    for key in ("fw_dir", "jasna_dir"):
+        if key in patch and patch[key]:
+            patch[key] = str(Path(patch[key]).expanduser())
+    if "mode" in patch:
+        patch["mode"] = jasna_core.normalize_mode(patch["mode"])
+    # 自动勾选规则或模式变了，旧的勾选记录是按老规则算的，必须清掉重算
+    cur = core.load_settings()
+    if "auto_select_rule" in patch and cur.get("auto_select_rule") != patch["auto_select_rule"]:
+        patch["selected"] = {}
+        patch["_auto_select"] = True
+    if "mode" in patch and jasna_core.normalize_mode(cur.get("mode")) != patch["mode"]:
+        # 换模式等于换一套跳过规则，历史勾选不再适用
+        patch["selected"] = {}
+        patch["_auto_select"] = True
     st = core.save_settings(patch)
-    MANAGER.configure(st.get("fw_dir", ""), core.find_ffmpeg(st))
+    MANAGER.configure(st.get("fw_dir", ""), core.find_ffmpeg(st), st.get("jasna_dir", ""))
     return {"settings": st, "fw": core.validate_fw_dir(st.get("fw_dir", "")),
+            "jasna": jasna_core.validate_jasna_dir(st.get("jasna_dir", "")),
             "ffmpeg": core.find_ffmpeg(st)}
+
+
+# --------------------------------------------------------------------------
+# Jasna：目录校验 / 自动查找 / 参数配置
+# --------------------------------------------------------------------------
+
+def api_validate_jasna(body, _q):
+    return jasna_core.validate_jasna_dir((body or {}).get("path", ""))
+
+
+def api_pick_default_jasna(_body, _q):
+    return jasna_core.pick_default_jasna_dir()
+
+
+def api_jasna_profiles(_body, _q):
+    return {"profiles": [{"name": k, **v}
+                         for k, v in jasna_core.all_jasna_profiles().items()]}
+
+
+def api_jasna_profile_save(body, _q):
+    body = body or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise ValueError("请填写配置名称")
+    jasna_core.save_jasna_profile(name, body.get("params") or {},
+                                  overwrite=bool(body.get("overwrite")))
+    st = core.save_settings({"last_jasna_profile": name})
+    return {"profiles": [{"name": k, **v}
+                         for k, v in jasna_core.all_jasna_profiles().items()],
+            "last_jasna_profile": st.get("last_jasna_profile")}
+
+
+def api_jasna_profile_delete(body, _q):
+    name = (body or {}).get("name", "")
+    if jasna_core.load_jasna_profiles().get(name) is None:
+        raise ValueError("内置配置不可删除")
+    jasna_core.delete_jasna_profile(name)
+    return {"profiles": [{"name": k, **v}
+                         for k, v in jasna_core.all_jasna_profiles().items()]}
+
+
+def api_jasna_profile_rename(body, _q):
+    body = body or {}
+    old = (body.get("name") or "").strip()
+    new = (body.get("new_name") or "").strip()
+    if not new:
+        raise ValueError("请填写新名称")
+    profs = jasna_core.load_jasna_profiles()
+    if old not in profs:
+        raise ValueError("内置配置不可重命名，请先另存为新配置")
+    if new in profs:
+        raise ValueError(f"配置「{new}」已存在")
+    profs[new] = profs.pop(old)
+    jasna_core.save_jasna_profiles(profs)
+    core.save_settings({"last_jasna_profile": new})
+    return {"profiles": [{"name": k, **v}
+                         for k, v in jasna_core.all_jasna_profiles().items()]}
+
+
+def api_jasna_check(body, _q):
+    """检查所选 Jasna 参数的外部依赖与取值合法性。"""
+    params = (body or {}).get("params") or {}
+    return {"issues": jasna_core.check_jasna_dependencies(params)}
+
+
+def api_jasna_preview(body, _q):
+    """预览 Jasna 命令行，便于排查参数问题。"""
+    st = core.load_settings()
+    src = Path((body or {}).get("path", ""))
+    params = jasna_core.normalize_jasna_params((body or {}).get("params") or {})
+    mode = jasna_core.normalize_mode((body or {}).get("mode")
+                                     or st.get("mode")
+                                     or jasna_core.MODE_UNBLUR)
+    out_dir = st.get("output_dir") or ""
+    policy = st.get("existing_output_policy", "number")
+    dst = core.output_video_name(src, out_dir, policy, mode)
+    wd = core.work_root() / "_preview"
+    args = jasna_core.build_jasna_args(params, src, dst, wd)
+    return {"cmd": "jasna.exe " + " ".join(args), "dst": str(dst),
+            "issues": jasna_core.check_jasna_dependencies(params)}
 
 
 def api_validate_fw(body, _q):
@@ -138,22 +243,29 @@ def api_scan(body, _q):
     folders = list(explicit) if explicit else ([folder] if folder else [])
     exts = body.get("exts") or st.get("video_exts") or core.DEFAULT_VIDEO_EXTS
     recursive = body.get("recursive", st.get("recursive", True))
-    rule = st.get("auto_select_rule", "not_c")
+    rule = st.get("auto_select_rule", "smart")
+    mode = jasna_core.normalize_mode(body.get("mode", st.get("mode")))
     items = core.scan_folder(folder, exts, recursive)
-    # 规则版本变化后，旧的勾选记录是按老规则算的，必须失效重算，
-    # 否则改完规则界面仍显示历史状态（-U 文件被错误地保持未勾选）。
-    if st.get("_auto_select") or st.get("_rule_version") != core.RULE_VERSION:
+    # 规则版本 / 模式 / 规则值任一变化后，旧的勾选记录都按老规则算的，必须失效重算
+    if (st.get("_auto_select") or st.get("_rule_version") != core.RULE_VERSION
+            or jasna_core.normalize_mode(st.get("mode")) != mode):
         selected = {}
         for it in items:
-            it["selected"] = core.auto_selected(Path(it["path"]).stem, rule)
+            it["selected"] = core.auto_selected(Path(it["path"]).stem, rule, mode)
     else:
         selected = st.get("selected") or {}
         for it in items:
             it["selected"] = bool(selected.get(it["path"]))
     for it in items:
+        stem = Path(it["path"]).stem
+        skip = jasna_core.should_skip(stem, mode)
         it["size_h"] = core.human_size(it["size"])
-        it["derived"] = core.is_derived_name(Path(it["path"]).stem)
-        it["target"] = core.target_stem(Path(it["path"]).stem) + Path(it["path"]).suffix
+        it["derived"] = core.is_derived_name(stem)
+        # 跳过的文件不给输出名：算出 b-U-U 这类名字只会误导用户，
+        # 实际根本不会产出。前端会把该列显示为「—」。
+        it["target"] = "" if skip else core.target_stem(stem, mode) + Path(it["path"]).suffix
+        it["skip"] = skip
+        it["skip_reason"] = jasna_core.skip_reason(stem, mode)
 
     # 传入 folders 时，顺带清掉「已纳管目录下、但文件已不存在」的勾选记录，
     # 否则这些幽灵记录会一直累积（用户删了文件，配置里还留着）。
@@ -222,11 +334,13 @@ def api_set_selected(body, _q):
     paths = (body or {}).get("paths") or []
     mode = (body or {}).get("mode", "set")
     value = bool((body or {}).get("value", True))
+    proc_mode = jasna_core.normalize_mode(
+        (body or {}).get("process_mode", st.get("mode")))
     sel = dict(st.get("selected") or {})
     if mode == "auto":
-        rule = st.get("auto_select_rule", "not_c")
+        rule = st.get("auto_select_rule", "smart")
         for p in paths:
-            sel[p] = core.auto_selected(Path(p).stem, rule)
+            sel[p] = core.auto_selected(Path(p).stem, rule, proc_mode)
     elif mode == "invert":
         for p in paths:
             sel[p] = not sel.get(p, False)
@@ -294,15 +408,34 @@ def api_rename_profile(body, _q):
 def api_start(body, _q):
     body = body or {}
     st = core.load_settings()
-    fw = core.validate_fw_dir(st.get("fw_dir", ""))
-    if not fw.get("ok"):
-        raise ValueError(fw.get("msg") or "Faster Whisper 路径未配置")
+    mode = jasna_core.normalize_mode(body.get("mode", st.get("mode")))
+    need_jasna = mode in (jasna_core.MODE_UNBLUR, jasna_core.MODE_BOTH)
+    need_sub = mode in (jasna_core.MODE_SUBTITLE, jasna_core.MODE_BOTH)
+
+    if need_jasna:
+        j = jasna_core.validate_jasna_dir(st.get("jasna_dir", ""))
+        if not j.get("ok"):
+            raise ValueError(j.get("msg") or "Jasna 路径未配置")
+    if need_sub:
+        fw = core.validate_fw_dir(st.get("fw_dir", ""))
+        if not fw.get("ok"):
+            raise ValueError(fw.get("msg") or "Faster Whisper 路径未配置")
     paths = [p for p in (body.get("paths") or []) if p]
     if not paths:
         raise ValueError("没有勾选任何文件")
+
     params = core.normalize_params(body.get("params") or {})
-    MANAGER.configure(st.get("fw_dir", ""), core.find_ffmpeg(st))
-    jobs = MANAGER.submit(paths, st, params)
+    jparams = jasna_core.normalize_jasna_params(body.get("jasna_params") or {})
+
+    # 参数合法性预检：有 error 级问题就不启动，避免跑到一半才失败
+    if need_jasna:
+        blocking = [i for i in jasna_core.check_jasna_dependencies(jparams)
+                    if i["level"] == "error"]
+        if blocking:
+            raise ValueError(blocking[0]["text"])
+
+    MANAGER.configure(st.get("fw_dir", ""), core.find_ffmpeg(st), st.get("jasna_dir", ""))
+    jobs = MANAGER.submit(paths, st, params, mode, jparams)
     return {"jobs": jobs, "state": MANAGER.state()}
 
 
@@ -336,22 +469,40 @@ def api_reveal(path, _q):
 
 
 def api_preview_cmd(body, _q):
-    """预览某个文件的完整命令，便于排查。"""
+    """预览某个文件在当前模式下将执行的完整命令链，便于排查参数问题。"""
     st = core.load_settings()
-    src = Path((body or {}).get("path", ""))
+    body = body or {}
+    src = Path(body.get("path", ""))
+    mode = jasna_core.normalize_mode(body.get("mode", st.get("mode")))
     params = core.normalize_params(body.get("params") or {})
+    jparams = jasna_core.normalize_jasna_params(body.get("jasna_params") or {})
     wd = core.work_root() / "_preview"
-    args = core.build_infer_args(params, src, wd)
-    return {"cmd": "infer.exe " + " ".join(args),
-            "dst": str(core.output_video_name(src, st.get("output_dir", ""),
-                                              st.get("existing_output_policy", "number")))}
+    dst = core.output_video_name(src, st.get("output_dir", ""),
+                                  st.get("existing_output_policy", "number"), mode)
+    lines = []
+    inter = None
+    if mode in (jasna_core.MODE_UNBLUR, jasna_core.MODE_BOTH):
+        # 模式 3 的 Jasna 产物是中间文件；模式 1 直接就是最终输出
+        inter = wd / f"{dst.stem}.mkv" if mode == jasna_core.MODE_BOTH else dst
+        lines.append("jasna.exe " + " ".join(
+            jasna_core.build_jasna_args(jparams, src, inter, wd)))
+    if mode in (jasna_core.MODE_SUBTITLE, jasna_core.MODE_BOTH):
+        base = inter if (mode == jasna_core.MODE_BOTH and inter) else src
+        lines.append("infer.exe " + " ".join(core.build_infer_args(params, base, wd)))
+        lines.append("ffmpeg " + " ".join(core.build_mux_args(
+            core.find_ffmpeg(st) or "ffmpeg", base, wd / "mux.srt", dst)))
+    return {"cmd": "\n".join(lines), "dst": str(dst),
+            "skip": jasna_core.should_skip(src.stem, mode),
+            "skip_reason": jasna_core.skip_reason(src.stem, mode)}
 
 
 def api_shutdown_prompt(body, _q):
     """关窗前的处理：保存所有设置 + 可选把未保存的参数另存为配置。"""
     body = body or {}
     saved = core.save_settings(body.get("settings") or {})
-    result = {"settings_saved": True, "profile_saved": False, "profile_name": ""}
+    result = {"settings_saved": True, "profile_saved": False, "profile_name": "",
+              "jasna_profile_saved": False}
+    # 字幕参数配置
     name = (body.get("profile_name") or "").strip()
     if body.get("save_profile") and name:
         try:
@@ -359,6 +510,16 @@ def api_shutdown_prompt(body, _q):
             core.save_settings({"last_profile": name})
             result["profile_saved"] = True
             result["profile_name"] = name
+        except Exception as e:
+            result["error"] = str(e)
+    # Jasna 参数配置（与字幕参数各自独立保存）
+    jname = (body.get("jasna_profile_name") or "").strip()
+    if body.get("save_jasna_profile") and jname:
+        try:
+            jasna_core.save_jasna_profile(jname, body.get("jasna_params") or {},
+                                           overwrite=bool(body.get("overwrite")))
+            core.save_settings({"last_jasna_profile": jname})
+            result["jasna_profile_saved"] = True
         except Exception as e:
             result["error"] = str(e)
     return result
@@ -377,6 +538,14 @@ ROUTES = {
     "/api/save_settings": api_save_settings,
     "/api/validate_fw": api_validate_fw,
     "/api/pick_default_fw": api_pick_default_fw,
+    "/api/validate_jasna": api_validate_jasna,
+    "/api/pick_default_jasna": api_pick_default_jasna,
+    "/api/jasna_profiles": api_jasna_profiles,
+    "/api/jasna_profile/save": api_jasna_profile_save,
+    "/api/jasna_profile/delete": api_jasna_profile_delete,
+    "/api/jasna_profile/rename": api_jasna_profile_rename,
+    "/api/jasna_check": api_jasna_check,
+    "/api/jasna_preview": api_jasna_preview,
     "/api/drives": api_drives,
     "/api/browse": api_browse,
     "/api/scan": api_scan,

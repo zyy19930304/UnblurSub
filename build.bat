@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 rem ==========================================================
-rem  FWSubsBatch build script (PyInstaller onedir)
+rem  UnblurSub build script (PyInstaller onedir)
 rem  Usage: double-click this file, or: build.bat
 rem  NOTE: keep this file pure ASCII to avoid GBK decode issues
 rem ==========================================================
@@ -13,7 +13,7 @@ set "VENV=.venv"
 set "VPY=%VENV%\Scripts\python.exe"
 
 echo ==========================================================
-echo   FWSubsBatch build
+echo   UnblurSub build
 echo ==========================================================
 echo.
 
@@ -91,7 +91,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 "%VPY%" -m PyInstaller --noconfirm --onedir --windowed --clean ^
-  --name FWSubsBatch ^
+  --name UnblurSub ^
   --add-data "web;web" ^
   --collect-submodules webview ^
   --hidden-import webview.platforms.edgechromium ^
@@ -112,8 +112,8 @@ if errorlevel 1 (
 echo.
 echo ==========================================================
 echo   BUILD OK
-echo   Output: dist\FWSubsBatch\FWSubsBatch.exe
-echo   Ship the whole dist\FWSubsBatch folder.
+echo   Output: dist\UnblurSub\UnblurSub.exe
+echo   Ship the whole dist\UnblurSub folder.
 echo ==========================================================
 echo.
 pause

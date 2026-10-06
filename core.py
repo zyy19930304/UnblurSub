@@ -14,13 +14,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+import jasna_core
+
 APP_NAME = "FWSubsBatch"
-APP_TITLE = "Faster Whisper 批量字幕工具"
+APP_TITLE = "UnblurSub视频修复与字幕工具"
 
 # 自动勾选规则版本号。规则语义变更时 +1，
 # 用于让旧版本遗留的勾选记录失效并按新规则重算。
 # v2: 自动勾选由「排除 -U/-UC」改为「排除 -C / -UC」
-RULE_VERSION = 2
+# v3: 自动勾选随处理模式变化（-U/-C/-UC 各自含义不同），命名规则由模式决定
+RULE_VERSION = 3
 
 # --------------------------------------------------------------------------
 # 存储位置
@@ -55,17 +58,21 @@ def work_root() -> Path:
 DEFAULT_VIDEO_EXTS = ["mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "ts", "m4v", "mpg", "mpeg", "3gp"]
 
 DEFAULT_SETTINGS = {
+    "mode": jasna_core.MODE_SUBTITLE,   # 处理模式 1/2/3
     "fw_dir": "",                 # Faster Whisper 程序目录（含 infer.exe）
+    "jasna_dir": "",              # Jasna 程序目录（含 jasna.exe）
     "ffmpeg_path": "",            # 留空 = 自动探测
     "folders": [],                # 已添加的视频文件夹
     "selected": {},               # {文件路径: True/False} 勾选状态
-    "last_profile": "",           # 上次加载的参数配置名
+    "last_profile": "",           # 上次加载的字幕参数配置名
+    "last_jasna_profile": "",     # 上次加载的 Jasna 参数配置名
     "video_exts": DEFAULT_VIDEO_EXTS,
     "recursive": True,
-    "auto_select_rule": "not_c",  # not_c = 排除 -C / -UC 结尾（已处理产物）
+    "auto_select_rule": "smart",  # smart = 按模式智能跳过 / all = 勾选全部
     "existing_output_policy": "number",  # number / skip / overwrite
     "output_dir": "",             # 新视频输出目录，留空 = 与源文件同目录
     "keep_srt": True,             # 封装后保留中间 SRT
+    "keep_intermediate": False,   # 保留模式 3 的中间视频（去马赛克后、加字幕前）
     "close_prompt": True,         # 关闭时提示保存未保存的参数配置
     "_auto_select": True,         # 是否按规则自动勾选（用户手动改过则为 False）
     "_rule_version": RULE_VERSION,  # 已应用规则的版本，见 RULE_VERSION
@@ -92,12 +99,15 @@ def load_settings() -> dict:
     # 兼容：老版本只有 selected 列表
     if isinstance(data.get("selected"), list):
         data["selected"] = {x: True for x in data["selected"]}
-    # 迁移：旧规则值 not_u（排除 -U/-UC）已改为 not_c（排除 -C/-UC），语义不同，
-    # 这里把落在磁盘上的旧值同步成新规则，避免界面下拉显示为空白。
-    if data.get("auto_select_rule") == "not_u":
-        data["auto_select_rule"] = "not_c"
-    if data.get("auto_select_rule") not in ("not_c", "all"):
+    # 迁移：旧规则值 not_u（排除 -U/-UC）、not_c（排除 -C/-UC）在 v3 已改为
+    # smart（按处理模式智能判断）。这里统一收敛，避免界面下拉显示为空白。
+    if data.get("auto_select_rule") not in ("smart", "all"):
         data["auto_select_rule"] = DEFAULT_SETTINGS["auto_select_rule"]
+    # 迁移：老版本没有 mode 字段
+    if "mode" not in data or str(data.get("mode")) not in ("1", "2", "3"):
+        data["mode"] = DEFAULT_SETTINGS["mode"]
+    else:
+        data["mode"] = jasna_core.normalize_mode(data["mode"])
     return data
 
 
@@ -463,41 +473,35 @@ def ffmpeg_broken_pipe_fix(path: str) -> list:
 # --------------------------------------------------------------------------
 # 命名规则
 # --------------------------------------------------------------------------
+# 后缀语义：-U = 已去马赛克，-C = 已加中文字幕，-UC = 两者都有
+# 具体规则与模式判定见 jasna_core（命名随处理模式变化，此处只做薄封装）
 
-def target_stem(stem: str) -> str:
-    """原名 -> 新名（严格按规格：原名加 -C；若原名以 -U 结尾则后缀改为 -UC）。
-
-    ABC      -> ABC-C
-    ABC-U    -> ABC-UC
-    ABC-C    -> ABC-C-C
-    ABC-UC   -> ABC-UC-C
-    """
-    if stem.endswith("-U"):
-        return stem[:-2] + "-UC"
-    return stem + "-C"
+def target_stem(stem: str, mode: int = jasna_core.MODE_SUBTITLE) -> str:
+    """原名-> 新名（随处理模式变化）。"""
+    return jasna_core.target_stem_mode(stem, mode)
 
 
 def is_derived_name(stem: str) -> bool:
-    """是否已经是处理过的产物（自动勾选时要排除）。
+    """是否已经是处理过的产物（-U / -C / -UC 结尾）。
 
-    规则：文件名后缀含 -C 或 -UC 的视为已处理产物。
-    注意：-U 是「待翻译的源文件」，不是产物，所以不排除。
+    注意：模式 3（两者都做）下 -U 与 -C 也算「已处理」，因为它们是半成品，
+    正确产物应该是 -UC。因此这里只要带任一标记就算产物。
     """
-    s = stem.lower()
-    return s.endswith("-c") or s.endswith("-uc")
+    f = jasna_core.processed_flags(stem)
+    return f["u"] or f["c"]
 
 
-def auto_selected(stem: str, rule: str = "not_c") -> bool:
-    """自动勾选规则：文件名后缀不含 -C 或 -UC。"""
-    if rule == "all":
-        return True
-    return not is_derived_name(stem)
+def auto_selected(stem: str, rule: str = "smart", mode: int = jasna_core.MODE_SUBTITLE) -> bool:
+    """自动勾选规则：按当前模式跳过已处理的文件。"""
+    return jasna_core.auto_selected_mode(stem, mode, rule)
 
 
-def output_video_name(src: Path, out_dir: str = "", policy: str = "number") -> Path:
+def output_video_name(src: Path, out_dir: str = "", policy: str = "number",
+                      mode: int = jasna_core.MODE_SUBTITLE) -> Path:
     """计算新视频文件路径；已存在时按 policy 处理，绝不静默覆盖。"""
     dst_dir = Path(out_dir).expanduser() if out_dir else src.parent
-    name = target_stem(src.stem) + src.suffix
+    new_stem = target_stem(src.stem, mode)
+    name = new_stem + src.suffix
     dst = dst_dir / name
     if not dst.exists() or policy == "overwrite":
         return dst
@@ -505,7 +509,7 @@ def output_video_name(src: Path, out_dir: str = "", policy: str = "number") -> P
         return dst
     n = 2
     while True:
-        cand = dst_dir / f"{target_stem(src.stem)} ({n}){src.suffix}"
+        cand = dst_dir / f"{new_stem} ({n}){src.suffix}"
         if not cand.exists():
             return cand
         n += 1
