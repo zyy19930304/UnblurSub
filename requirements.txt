@@ -1,6 +1,6 @@
-# FWSubsBatch 依赖
-# 运行时后端（server.py）只用 Python 标准库，无需安装任何运行时依赖。
-# 以下为「桌面窗口」与「打包 exe」所需。
+# UnblurSub 依赖
+# 运行时后端（server.py / core.py / jasna_core.py）只用 Python 标准库，
+# 无需安装任何运行时依赖。以下为「桌面窗口」与「打包 exe」所需。
 
 # 桌面窗口（原生 WebView2）。缺失时程序自动降级：Edge 应用窗口 -> 系统浏览器
 pywebview>=4.4
