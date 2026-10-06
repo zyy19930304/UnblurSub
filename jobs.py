@@ -109,6 +109,10 @@ class JobManager:
         self.running = False
         self.current_id = ""
         self.mode = jasna_core.MODE_SUBTITLE
+        # worker 是否还活着。用它而不是 thread.is_alive() 判断，
+        # 因为线程从「决定收工」到真正退出之间有一小段窗口，
+        # 那时 is_alive() 仍为 True，此刻提交的新任务会被永远丢弃。
+        self._worker_active = False
         self.summary = {"total": 0, "done": 0, "failed": 0, "skipped": 0, "canceled": 0}
 
     # ---------------- 队列控制 ----------------
@@ -138,11 +142,13 @@ class JobManager:
         return [j.to_dict() for j in self.jobs]
 
     def _ensure_thread(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self.running = True
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._worker_active:
+                return
+            self._worker_active = True
+            self.running = True
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
 
     def stop(self, cancel_running: bool = True):
         self.log.push("收到停止指令", "warn")
@@ -170,76 +176,129 @@ class JobManager:
             }
 
     def _kill_current(self):
-        pid_file = getattr(self, "_pidfile", None)
-        if pid_file and os.path.exists(pid_file):
+        """终止当前正在跑的子进程（连同它派生的孙进程）。
+
+        这里曾有三个叠加的问题，导致「停止」按钮完全无效：
+          1. 读的是 self._pidfile —— 该属性从未被赋值，pid_file 恒为 None；
+          2. psutil 分支拿「pid 文件名」去匹配子进程的命令行，
+             而 pid 文件里存的是真实命令行，两者永远对不上，等于没杀；
+          3. 只杀父进程 —— Jasna / infer.exe 会再拉起 ffmpeg 等子进程，
+             父进程一死子进程继续跑，用户看到「停了但还在转」。
+        现在改为：以 pid 文件里记录的 pid 为准，递归杀掉整棵进程树。
+        """
+        pid_file = self._pidfile_path()
+        if not pid_file.exists():
+            self.log.push("未发现运行中的子进程（可能正卡在阶段切换处）", "info")
+            return
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip().split("|")[0])
+        except Exception:
+            pid = 0
+
+        killed = False
+        try:
+            import psutil  # 可选依赖
+        except ImportError:
+            psutil = None
+
+        if psutil and pid:
             try:
-                import psutil  # 可选
-            except ImportError:
-                psutil = None
-            try:
-                if psutil:
-                    for p in psutil.process_iter(["pid", "cmdline"]):
-                        cl = p.info.get("cmdline") or []
-                        if any(str(pid_file.name) in str(c) for c in cl):
-                            p.kill()
-                else:
-                    with open(pid_file) as f:
-                        for line in f:
-                            pid = int(line.strip().split("|")[0])
-                            try:
-                                os.kill(pid, 9)
-                            except Exception:
-                                pass
+                root = psutil.Process(pid)
+                victims = root.children(recursive=True) + [root]
+                for p in victims:
+                    try:
+                        p.kill()
+                        killed = True
+                    except Exception:
+                        pass
             except Exception:
                 pass
-        self._kill_flag = True
+        elif pid:
+            try:
+                os.kill(pid, 9)
+                killed = True
+            except Exception:
+                pass
+        if not killed and os.name == "nt" and pid:
+            # 没有 psutil 时的兜底：taskkill /T 连同子进程树一起杀
+            try:
+                import subprocess
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                killed = True
+            except Exception:
+                pass
+        self.log.push("已终止当前子进程" if killed else "未能终止子进程", "warn")
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
 
     # ---------------- 工作线程 ----------------
     def _worker(self):
-        while True:
-            try:
-                job = self._q.get(timeout=0.5)
-            except queue.Empty:
-                if self._stop.is_set() and self._q.empty():
-                    self.running = False
+        try:
+            while True:
+                try:
+                    job = self._q.get(timeout=0.5)
+                except queue.Empty:
+                    if self._stop.is_set() and self._q.empty():
+                        self.log.push("队列已停止", "warn")
+                        return
+                    continue
+                if self._stop.is_set():
+                    job.status = "canceled"
+                    job.stage = "已取消"
+                    self.summary["canceled"] += 1
+                    self._q.task_done()
+                    continue
+                self.current_id = job.id
+                wd = None
+                try:
+                    wd = self._process(job)
+                except Exception as e:
+                    if self._stop.is_set():
+                        # 用户主动停的，不该记成「失败」
+                        job.status = "canceled"
+                        job.stage = "已取消"
+                        self.summary["canceled"] += 1
+                        self.log.push(f"[已取消] {job.src.name}", "warn")
+                    else:
+                        job.status = "failed"
+                        job.stage = "异常"
+                        job.error = f"{e}"
+                        self.summary["failed"] += 1
+                        self.log.push(f"[失败] {job.src.name}: {e}", "error")
+                        self.log.push(traceback.format_exc(), "error")
+                else:
+                    # 单个视频导出后动作（Jasna GUI 的 post_export_video_command）
+                    self._run_post_export_video(job)
+                finally:
+                    # 无论成功/失败都清理临时工作目录，避免长期堆积垃圾。
+                    # 例外：模式 3 且用户开启了「保留中间视频」——
+                    # 此时把中间视频移出工作目录再删工作目录，否则会连带删掉。
+                    if wd:
+                        self._preserve_intermediate(job, wd)
+                        shutil.rmtree(wd, ignore_errors=True)
+                    job.ended_at = time.time()
                     self.current_id = ""
-                    self.log.push("队列已停止", "warn")
+                    self._q.task_done()
+                # 队列真正跑完（而非被停止）时，执行队列级动作
+                if self._q.empty() and not self._stop.is_set():
+                    self._run_post_export_queue()
                     return
-                continue
-            if self._stop.is_set():
-                job.status = "canceled"
-                job.stage = "已取消"
-                self.summary["canceled"] += 1
-                self._q.task_done()
-                continue
-            self.current_id = job.id
-            wd = None
-            try:
-                wd = self._process(job)
-            except Exception as e:
-                job.status = "failed"
-                job.stage = "异常"
-                job.error = f"{e}"
-                self.summary["failed"] += 1
-                self.log.push(f"[失败] {job.src.name}: {e}", "error")
-                self.log.push(traceback.format_exc(), "error")
-            else:
-                # 单个视频导出后动作（Jasna GUI 的 post_export_video_command）
-                self._run_post_export_video(job)
-            finally:
-                # 无论成功/失败都清理临时工作目录，避免长期堆积垃圾。
-                # 例外：模式 3 且用户开启了「保留中间视频」——
-                # 此时把中间视频移出工作目录再删工作目录，否则会连带删掉。
-                if wd:
-                    self._preserve_intermediate(job, wd)
-                    shutil.rmtree(wd, ignore_errors=True)
-                job.ended_at = time.time()
+        finally:
+            # 无论从哪条路径退出（正常跑完 / 被停止 / 意外抛异常），
+            # 都必须复位 running 与 _worker_active —— 否则 state() 永远返回
+            # running=true，前端「开始」按钮一直灰着、「停止」按钮一直亮着，
+            # 表现为「处理完成后不会停止」。
+            with self._lock:
+                self._worker_active = False
+                self.running = False
                 self.current_id = ""
-                self._q.task_done()
-            # 队列真正跑完（而非被停止）时，执行队列级动作
-            if self._q.empty() and not self._stop.is_set():
-                self._run_post_export_queue()
-                return
+            # 收工瞬间可能正好有新任务入队（提交与收尾的竞态窗口）。
+            # 此时队列非空，就地接力拉起新 worker，别让这批任务烂在队列里。
+            if not self._stop.is_set() and not self._q.empty():
+                self._ensure_thread()
 
     # ---------------- 导出后动作 ----------------
     def _run_post_export_video(self, job: Job):
@@ -486,7 +545,9 @@ class JobManager:
                              on_line=on_line, stop_flag=self._stop,
                              pidfile=self._pidfile_path())
         if rc != 0 or self._stop.is_set():
-            raise RuntimeError(f"转录失败（退出码 {rc}）" + ("" if rc == 0 else "，详见日志"))
+            # 括号里的三元表达式原先写反了：rc==0 时反而打印"详见日志"
+            raise RuntimeError(f"转录失败（退出码 {rc}）"
+                               + ("，详见日志" if rc != 0 else "，已中止"))
 
         # ---------- 校验字幕 ----------
         job.stage = "校验字幕"

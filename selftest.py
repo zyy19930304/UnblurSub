@@ -882,6 +882,142 @@ check_true("前端调 /api/jasna_profile/save", "/api/jasna_profile/save" in _js
 check_true("前端不再有旧规则 not_c", "not_c" not in _js)
 check_true("旧检查函数已移除（改为 checkDirs）", "function checkFw(" not in _js)
 
+# ------------------------------------------- 19. 队列生命周期（曾「处理完成后不会停止」）
+section("19. 队列收尾与停止（曾出现处理完成后不会停止）")
+
+import jobs as _jobs_mod  # noqa: E402
+import time as _time      # noqa: E402
+
+_jobs_src = (_jobs_mod.__file__ and
+             Path(_jobs_mod.__file__).read_text(encoding="utf-8")) or ""
+
+# --- 结构性断言：钉死三个曾经致命的写法 ---
+check("_worker 有 finally 兜底复位 running",
+      re.search(r"finally:\s*\n\s*#.*\n(?:.*\n)*?\s*self\.running = False", _jobs_src)
+      is not None, True)
+check("running 复位在 finally 内（而非仅停止分支）",
+      _jobs_src.count("self.running = False") >= 2, True)
+check("_ensure_thread 用 _worker_active 而非 is_alive",
+      "if self._worker_active:" in _jobs_src, True)
+check("不再用 is_alive() 判断 worker 存活",
+      "self._thread.is_alive()" not in _jobs_src, True)
+check("_kill_current 不再读未赋值的 self._pidfile",
+      "getattr(self, \"_pidfile\"" not in _jobs_src, True)
+check("_kill_current 改用 _pidfile_path()", "self._pidfile_path()" in _jobs_src, True)
+check("停止时按 pid 杀进程树", "children(recursive=True)" in _jobs_src, True)
+check("无 psutil 时有 taskkill 兜底", "taskkill" in _jobs_src, True)
+check("停止后不再使用没人读的 _kill_flag", "_kill_flag" not in _jobs_src, True)
+check("stop 触发的中断记为 canceled 而非 failed",
+      re.search(r"if self\._stop\.is_set\(\):\s*\n(?:.*\n){0,4}?\s*job\.status = \"canceled\"",
+                _jobs_src) is not None, True)
+
+# --- 行为性断言：真跑一遍队列生命周期 ---
+class _FakeMgr(_jobs_mod.JobManager):
+    """用可控的假流水线替代真实视频处理，专测队列生命周期。"""
+
+    def _process(self, job):
+        job.status = "running"
+        job.started_at = _time.time()
+        job.progress = 50
+        end = _time.time() + 0.25
+        while _time.time() < end:
+            if self._stop.is_set():
+                raise RuntimeError("已中止")
+            _time.sleep(0.02)
+        job.status = "done"
+        job.stage = "完成"
+        job.dst = job.src.with_name(job.src.stem + "-C.mp4")
+        self.summary["done"] += 1
+        return None
+
+
+def _wait_idle(m, timeout=30):
+    end = _time.time() + timeout
+    while _time.time() < end:
+        with m._lock:
+            if not m._worker_active and m._q.empty():
+                return True
+        _time.sleep(0.02)
+    return False
+
+
+with tempfile.TemporaryDirectory() as td:
+    old_app = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td          # 临时 APPDATA，绝不动用户真实配置
+    try:
+        _sv = Path(td) / "vids"
+        _sv.mkdir(parents=True, exist_ok=True)
+        _vs = []
+        for _i in range(3):
+            _f = _sv / f"clip{_i}.mp4"
+            _f.write_bytes(b"\x00" * 128)
+            _vs.append(_f)
+
+        # 1) 正常跑完 -> running 必须复位（这是「不会停止」的直接原因）
+        _m = _FakeMgr()
+        _m.submit([str(v) for v in _vs], {"keep_srt": True},
+                  core.default_params(), mode=2, jasna_params={})
+        check("正常跑完后 worker 退出", _wait_idle(_m), True)
+        _st = _m.state()
+        check("正常跑完后 running=False（曾恒为 true）", _st["running"], False)
+        check("正常跑完后 stopping=False", _st["stopping"], False)
+        check("正常跑完后 done 数正确", _st["summary"]["done"], 3)
+        check("跑完后 worker_active 已释放", _m._worker_active, False)
+
+        # 2) 中途停止 -> 快速停下，且不误判为 failed
+        _m2 = _FakeMgr()
+        _m2.submit([str(v) for v in _vs], {"keep_srt": True},
+                   core.default_params(), mode=2, jasna_params={})
+        _time.sleep(0.3)
+        _t0 = _time.time()
+        _m2.stop(True)
+        _idle2 = _wait_idle(_m2)
+        _dt = _time.time() - _t0
+        _st2 = _m2.state()
+        check("停止后 worker 退出", _idle2, True)
+        check("停止后 running=False", _st2["running"], False)
+        check_true("停止响应及时（< 2s）", _dt < 2.0, f"{_dt:.2f}s")
+        _sts = [j["status"] for j in _st2["jobs"]]
+        check("停止时剩余任务记为 canceled", sorted(set(_sts)) and
+              all(x in ("done", "canceled") for x in _sts), True)
+        check("停止不应产生 failed", [x for x in _sts if x == "failed"], [])
+
+        # 3) 竞态：worker 收工瞬间再提交，任务不能丢
+        _m3 = _FakeMgr()
+        _m3.submit([str(_vs[0])], {"keep_srt": True},
+                   core.default_params(), mode=2, jasna_params={})
+        _time.sleep(0.22)               # 卡在即将收工的时刻
+        _m3.submit([str(v) for v in _vs[1:3]], {"keep_srt": True},
+                   core.default_params(), mode=2, jasna_params={})
+        check("收工竞态下 worker 最终退出", _wait_idle(_m3), True)
+        check("收工竞态下队列不残留", _m3._q.qsize(), 0)
+        check("收工竞态下任务全部完成", _m3.summary["done"], 3)
+        check("收工竞态下 running=False", _m3.state()["running"], False)
+
+        # 4) 停止时真的能杀掉在跑的子进程
+        _m4 = _FakeMgr()
+        import subprocess as _sp
+        _pr = _sp.Popen([sys.executable, "-c", "import time;_time.sleep(60)"],
+                        stdout=_sp.PIPE, stderr=_sp.STDOUT,
+                        creationflags=(_sp.CREATE_NO_WINDOW if os.name == "nt" else 0))
+        _pf = _m4._pidfile_path()
+        _pf.write_text(f"{_pr.pid}|fake-child", encoding="utf-8")
+        _m4._kill_current()
+        _time.sleep(0.5)
+        _alive = _pr.poll() is None
+        try:
+            _pr.kill()
+            _pr.wait(timeout=5)
+        except Exception:
+            pass
+        check("停止后子进程真的被杀掉", _alive, False)
+        check("停止后 pid 文件被清理", _pf.exists(), False)
+    finally:
+        if old_app is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app
+
 # ---------------------------------------------------------------- 汇总
 print("\n" + "=" * 56)
 print(f"  通过 {PASS} / {PASS + FAIL}   失败 {FAIL}")

@@ -6,15 +6,13 @@
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Self-test](https://img.shields.io/badge/selftest-350%2F350-4CAF50)
+![Self-test](https://img.shields.io/badge/selftest-376%2F376-4CAF50)
 
 **视频处理 + 中文字幕生成的 Windows 批量桌面工具。**
 
-把 **[Jasna](https://github.com/Kruk2/jasna)**（AI 视频处理）与
+把 **[Jasna](https://github.com/Kruk2/jasna)**（AI 视频处理）与**[Faster-Whisper-TransWithAI-ChickenRice](https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice)**（日语音视频转录翻译）
 
-**[Faster-Whisper-TransWithAI-ChickenRice](https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice)**
-
-（日语音视频转录翻译）整合到一个窗口：选好处理模式，批量导入视频，剩下的交给队列。
+整合到一个窗口：选好处理模式，批量导入视频，剩下的交给队列。
 
 ---
 
@@ -91,9 +89,7 @@ Jasna 本身还向以下开源项目致谢，本工具间接使用了它们的�
 ### 其他
 
 - **[FFmpeg](https://ffmpeg.org/)**（LGPL / GPL）—— 字幕封装与格式转换
-- **[Open Faster Whisper](https://github.com/SYSTRAN/faster-whisper)** 与
-  
-  \*\*Whisper\](<https://github.com/openai/whisper)\*\*（MIT> / MIT-CC-BY）—— 语音识别模型
+- **[Open Faster Whisper](https://github.com/SYSTRAN/faster-whisper)** 与**[Whisper](<https://github.com/openai/whisper)**（MIT> / MIT-CC-BY）—— 语音识别模型
 
 **本项目自身**以 MIT 许可开源，是上述项目的**独立 GUI 集成前端**，
 
@@ -230,23 +226,9 @@ build.bat
 [2/6] 创建 / 复用 .venv 独立虚拟环境
 [3/6] 升级 pip
 [4/6] 安装 requirements.txt
-[5/6] 运行 selftest.py（350 项断言，不通过则中止打包）
+[5/6] 运行 selftest.py（376 项断言，不通过则中止打包）
 [6/6] PyInstaller onedir 打包
 ```
-
-### 为什么自建虚拟环境
-
-Windows 上常同时存在多个 Python 解释器：Microsoft Store 的
-
-`WindowsApps\python.exe` **占位符**、conda 环境、编辑器托管环境、WSL 里的……
-
-直接 `pip install` 到底装到哪个解释器，完全取决于 `PATH` 顺序，极不可控
-
-（曾因此把依赖装进了一个根本不会用来跑程序的环境）。
-
-所以脚本**自建 `.venv`**，从第 4 步之后所有依赖都锁死在 `.venv` 里，
-
-与系统 Python 完全隔离。
 
 ### 前置条件
 
@@ -314,7 +296,7 @@ dist\UnblurSub\
 
 ## 使用方法
 
-### 方式一：使用打包好的 exe（推荐给同事）
+### 方式一：使用打包好的 exe
 
 1. 拿到完整的 `dist\UnblurSub\` 文件夹，解压到任意位置
 2. 双击 `UnblurSub.exe`
@@ -380,16 +362,16 @@ pywebview（原生 WebView2）→ Edge --app 应用窗口 → 系统默认浏览
 ## 界面说明
 
 ```
-┌─ 顶栏：Faster Whisper / Jasna / ffmpeg 就绪状态 ─────────────────┐
-├─ 处理模式：[只做视频处理 -U] [只加字幕 -C] [两者 -UC] ← 当前模式说明 ─┤
-├─ 1 · 视频文件 ───────────────┬─ 2 · 参数配置（Tab 切换）──────┤
-│  文件夹添加 / 状态标签       │  [字幕参数] [Jasna 参数]        │
-│  全选 自动勾选 反选 清空      │  配置方案下拉 + 加载/另存       │
-│  文件列表（输出名/跳过标签）   │  6 分组参数（滑块+下拉+说明）     │
-│                              │  依赖自检提示条                 │
-├─ 3 · 执行进度与日志 ─────────┴──────────────────────────────┤
-│  每个文件的进度条 + 状态   │  实时日志（命令、infer/jasna 输出） │
-└───────────────────────────────────────────────────────────┘
+┌─ 顶栏：Faster Whisper / Jasna / ffmpeg 就绪状态 ──────────────────┐
+├─ 处理模式：[只做视频处理 -U] [只加字幕 -C] [两者 -UC] ← 当前模式说明  ─┤
+├─ 1 · 视频文件 ────────────┬─ 2 · 参数配置（Tab 切换）──────────────┤
+│  文件夹添加 / 状态标签      │  [字幕参数] [Jasna 参数]              │
+│  全选 自动勾选 反选 清空    │  配置方案下拉 + 加载/另存               │
+│  文件列表（输出名/跳过标签） │  6 分组参数（滑块+下拉+说明）           │
+│                          │  依赖自检提示条                       │
+├─ 3 · 执行进度与日志 ───────┴─────────────────────────────────────┤
+│  每个文件的进度条 + 状态    │  实时日志（命令、infer/jasna 输出）     │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ![参数界面](./README.assets/screenshot-params.png)
@@ -558,7 +540,7 @@ A：代码有问题导致自测不通过，打包被中止。先跑 `python self
 ## 开发与测试
 
 ```bash
-python selftest.py      # 350 项断言，不需要 GPU / 网络 / 任何外部程序
+python selftest.py      # 376 项断言，不需要 GPU / 网络 / 任何外部程序
 ```
 
 覆盖范围：
@@ -584,7 +566,7 @@ UnblurSub/
 ├── core.py             # 核心逻辑：字幕参数 schema、命名规则、扫描、封装
 ├── jasna_core.py       # Jasna 集成：参数 schema、命令构造、目录校验、依赖自检
 ├── jobs.py             # 任务队列与流水线：模式驱动的视频处理 / 字幕双流程
-├── selftest.py         # 350 项断言的自测套件（零外部依赖）
+├── selftest.py         # 376 项断言的自测套件（零外部依赖）
 ├── build.bat           # 自建 venv + 跑自测 + PyInstaller onedir 打包
 ├── requirements.txt
 └── web/                # 前端（原生 HTML/CSS/JS，无框架无构建）
@@ -654,8 +636,5 @@ POST /api/pick_default_jasna
 - 作者不对因使用本工具产生的任何数据损失、版权纠纷或法律后果承担责任
 - 请仅将本工具用于**你拥有合法权利处理**的素材
 
-再次感谢 [Jasna](https://github.com/Kruk2/jasna) 与
+**再次感谢 [Jasna](https://github.com/Kruk2/jasna) 与[Faster-Whisper-TransWithAI-ChickenRice](https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice)及其背后所有开源贡献者。没有他们的工作，本工具无从存在。**
 
-[Faster-Whisper-TransWithAI-ChickenRice](https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice)
-
-及其背后所有开源贡献者。没有他们的工作，本工具无从存在。
