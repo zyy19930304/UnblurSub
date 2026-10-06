@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Self-test](https://img.shields.io/badge/selftest-192%2F192-4CAF50)](./selftest.py)
 
-**给 [Faster-Whisper-TransWithAI](https://github.com/readbeyond/Faster-Whisper-TransWithAI) 套一层 Windows 桌面 GUI的批量字幕工具。**
+**给[Faster-Whisper-TransWithAI-ChickenRice](https://github.com/TransWithAI/Faster-Whisper-TransWithAI-ChickenRice)套一层 Windows 桌面 GUI的批量字幕工具。**
 
 原版只能拖单个文件进 `.bat`，参数写死在脚本里。本工具把「加文件夹 → 勾选 → 选参数配置 → 批量出片」做成一个窗口，串行队列逐个处理，**封装阶段零重编码**（`-c copy`）。
 
