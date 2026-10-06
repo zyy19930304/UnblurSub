@@ -100,7 +100,7 @@ build.bat
 
 ## 使用流程
 
-![](D:\GitHub_Workspace\UnblurSub\README.assets\企业微信截图_20261006114053.png)
+![主界面](./README.assets/screenshot-main-ui.png)
 
 1. **添加文件夹** —— 粘贴路径或点「浏览…」选目录，程序递归列出视频文件
 2. **勾选** —— 「自动勾选」一键排除已处理的 `-C` / `-UC` 产物；列表里直接显示每个文件的输出名预览
