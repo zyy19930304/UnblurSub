@@ -1,0 +1,13 @@
+# FWSubsBatch 依赖
+# 运行时后端（server.py）只用 Python 标准库，无需安装任何运行时依赖。
+# 以下为「桌面窗口」与「打包 exe」所需。
+
+# 桌面窗口（原生 WebView2）。缺失时程序自动降级：Edge 应用窗口 -> 系统浏览器
+pywebview>=4.4
+
+# 打包 exe（build.bat 第 6 步使用）
+pyinstaller>=6.6
+
+# 可选：更可靠地终止正在运行的 infer.exe 子进程（取消/停止时生效）。
+# 不装也能工作，会退回到 os.kill 方案。
+psutil>=5.9

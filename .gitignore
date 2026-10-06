@@ -1,0 +1,29 @@
+# 编译产物
+build/
+dist/
+*.spec
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 打包临时文件
+*.tmp
+*.part
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+
+.workbuddy/memory/

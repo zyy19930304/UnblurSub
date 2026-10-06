@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Faster Whisper 批量字幕工具</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">FW</span>
+      <div>
+        <h1 id="appTitle">Faster Whisper 批量字幕工具</h1>
+        <div class="sub" id="appVer">v1.0.0</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="fwBadge" class="badge warn">Faster Whisper 未配置</span>
+      <span id="ffBadge" class="badge">ffmpeg 检测中…</span>
+      <button id="btnSettings" class="btn ghost">⚙ 设置</button>
+      <button id="btnCloseApp" class="btn ghost danger" title="保存设置并退出">✕ 退出</button>
+    </div>
+  </header>
+
+  <!-- ============ 主体 ============ -->
+  <main class="layout">
+
+    <!-- 左栏：文件夹 + 文件列表 -->
+    <section class="pane pane-files">
+      <div class="pane-head">
+        <h2>1 · 视频文件</h2>
+        <div class="pane-head-actions">
+          <button id="btnScanAll" class="btn tiny">↻ 重新扫描</button>
+        </div>
+      </div>
+
+      <div class="folder-add">
+        <input id="inpFolder" type="text" placeholder="粘贴视频文件夹路径，回车添加…" spellcheck="false">
+        <button id="btnBrowse" class="btn tiny">浏览…</button>
+        <button id="btnAddFolder" class="btn tiny primary">添加</button>
+      </div>
+
+      <div id="folderChips" class="chips"></div>
+
+      <div class="file-toolbar">
+        <label class="mini"><input type="checkbox" id="chkAll"> 全选</label>
+        <button id="btnAuto" class="btn tiny" title="勾选文件名后缀不含 -C / -UC 的文件（-U 源文件会被勾选）">自动勾选</button>
+        <button id="btnInvert" class="btn tiny">反选</button>
+        <button id="btnNone" class="btn tiny">清空勾选</button>
+        <div class="spacer"></div>
+        <span id="fileStat" class="stat">未扫描</span>
+      </div>
+
+      <div class="file-list-head">
+        <span></span><span class="c-name">文件名</span><span class="c-size">大小</span>
+        <span class="c-dst">输出文件名</span>
+      </div>
+      <div id="fileList" class="file-list">
+        <div class="empty">
+          <div class="empty-icon">🎬</div>
+          <p>还没有添加文件夹</p>
+          <p class="hint">粘贴视频文件夹路径 → 添加 → 自动递归扫描视频文件</p>
+        </div>
+      </div>
+
+      <div class="pane-foot">
+        <label class="mini"><input type="checkbox" id="chkRecursive" checked> 递归扫描子文件夹</label>
+        <label class="mini"><input type="checkbox" id="chkKeepSrt" checked> 保留独立 SRT 文件</label>
+      </div>
+    </section>
+
+    <!-- 右栏：参数配置 + 执行 -->
+    <section class="pane pane-config">
+      <div class="pane-head">
+        <h2>2 · Faster Whisper 参数配置</h2>
+        <div class="pane-head-actions">
+          <span id="dirtyDot" class="dirty hidden" title="当前参数已修改但未保存为配置">● 未保存</span>
+        </div>
+      </div>
+
+      <div class="profile-bar">
+        <label class="lbl">配置方案</label>
+        <select id="selProfile"></select>
+        <button id="btnLoadProfile" class="btn tiny">加载</button>
+        <button id="btnSaveProfile" class="btn tiny primary">另存为…</button>
+        <button id="btnRenameProfile" class="btn tiny" title="仅用户配置可重命名">重命名</button>
+        <button id="btnDelProfile" class="btn tiny danger">删除</button>
+      </div>
+      <div id="profileHelp" class="profile-help"></div>
+
+      <div class="param-scroll">
+        <div id="paramForm"></div>
+      </div>
+
+      <div class="pane-foot config-foot">
+        <button id="btnPreview" class="btn tiny ghost">预览命令</button>
+        <button id="btnResetParams" class="btn tiny ghost">恢复默认</button>
+        <div class="spacer"></div>
+        <span id="selCount" class="stat">已勾选 0 个文件</span>
+        <button id="btnStart" class="btn primary lg">▶ 开始处理</button>
+        <button id="btnStop" class="btn danger lg" disabled>■ 停止</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ 底部：进度 + 日志 ============ -->
+  <section class="pane pane-log">
+    <div class="pane-head">
+      <h2>3 · 执行进度与日志</h2>
+      <div class="pane-head-actions">
+        <span id="sumBar" class="sum"></span>
+        <button id="btnClearDone" class="btn tiny">清除已完成</button>
+        <button id="btnClearLog" class="btn tiny">清空日志</button>
+      </div>
+    </div>
+    <div class="overall"><div id="overallBar"></div></div>
+    <div class="log-body">
+      <div class="jobs" id="jobList"></div>
+      <div id="logBox" class="log-box"></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============ 设置弹窗 ============ -->
+<div id="modalSettings" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head"><h3>⚙ 设置</h3><button class="modal-x" data-close>✕</button></div>
+    <div class="modal-body">
+      <label class="fld">
+        <span>Faster Whisper 程序目录（须含 infer.exe）</span>
+        <div class="row">
+          <input id="inpFwDir" type="text" spellcheck="false" placeholder="D:\...\faster_whisper_transwithai_windows_cu128">
+          <button id="btnFwBrowse" class="btn tiny">浏览…</button>
+          <button id="btnFwAuto" class="btn tiny">自动查找</button>
+        </div>
+        <em id="fwMsg" class="msg"></em>
+      </label>
+      <label class="fld">
+        <span>ffmpeg 路径（留空 = 自动查找，用于无重编码封装字幕）</span>
+        <div class="row"><input id="inpFfmpeg" type="text" spellcheck="false" placeholder="留空自动查找"></div>
+        <em id="ffMsg" class="msg"></em>
+      </label>
+      <label class="fld">
+        <span>新视频输出目录（留空 = 与源文件同目录）</span>
+        <div class="row"><input id="inpOutDir" type="text" spellcheck="false" placeholder="留空 = 源文件所在文件夹"></div>
+      </label>
+      <label class="fld">
+        <span>同名输出已存在时</span>
+        <select id="selPolicy">
+          <option value="number">自动加序号 (2)(3)…（推荐，不覆盖）</option>
+          <option value="skip">跳过该文件</option>
+          <option value="overwrite">覆盖原文件</option>
+        </select>
+      </label>
+      <label class="fld">
+        <span>自动勾选规则</span>
+        <select id="selAutoRule">
+          <option value="not_c">勾选文件名后缀不含 -C / -UC 的文件</option>
+          <option value="all">勾选全部文件</option>
+        </select>
+      </label>
+      <label class="fld">
+        <span>视频扩展名（逗号分隔）</span>
+        <input id="inpExts" type="text" spellcheck="false">
+      </label>
+      <label class="fld inline"><input type="checkbox" id="chkClosePrompt" checked>
+        <span>关闭程序时，若参数已修改则提示是否保存为新配置</span></label>
+      <div class="naming-note">
+        <b>命名规则</b>：<code>原名-C.扩展名</code>；若原名以 <code>-U</code> 结尾，则新文件为
+        <code>原名-UC.扩展名</code>。字幕轨道名称固定为 <b>中文字幕</b>，视频与音频流直接 copy，不重新编码。
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close>取消</button>
+      <button id="btnSaveSettings" class="btn primary">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 目录浏览器 ============ -->
+<div id="modalBrowse" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head"><h3>📁 选择文件夹</h3><button class="modal-x" data-close>✕</button></div>
+    <div class="modal-body">
+      <div class="row">
+        <select id="selDrive"></select>
+        <input id="inpBrowsePath" type="text" spellcheck="false">
+        <button id="btnGoPath" class="btn tiny">前往</button>
+        <button id="btnUpDir" class="btn tiny">⬆ 上级</button>
+      </div>
+      <div id="browseList" class="browse-list"></div>
+    </div>
+    <div class="modal-foot">
+      <label class="mini inline"><input type="checkbox" id="chkPickExe"> 选择 infer.exe（切换到上级目录）</label>
+      <div class="spacer"></div>
+      <button class="btn" data-close>取消</button>
+      <button id="btnPickDir" class="btn primary">选择当前文件夹</button>
+      <button id="btnPickFw" class="btn primary">设为 Faster Whisper 目录</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 另存配置 ============ -->
+<div id="modalSaveProfile" class="modal hidden">
+  <div class="modal-box narrow">
+    <div class="modal-head"><h3>💾 另存为新配置</h3><button class="modal-x" data-close>✕</button></div>
+    <div class="modal-body">
+      <label class="fld"><span>配置名称</span>
+        <input id="inpProfileName" type="text" placeholder="例：我的 GPU 低显存配置"></label>
+      <label class="fld inline"><input type="checkbox" id="chkOverwrite"><span>覆盖同名配置</span></label>
+      <em id="saveProfileMsg" class="msg"></em>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close>取消</button>
+      <button id="btnConfirmSaveProfile" class="btn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 命令预览 ============ -->
+<div id="modalPreview" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head"><h3>🔍 命令预览</h3><button class="modal-x" data-close>✕</button></div>
+    <div class="modal-body"><pre id="previewText" class="preview"></pre></div>
+    <div class="modal-foot"><button class="btn primary" data-close>关闭</button></div>
+  </div>
+</div>
+
+<!-- ============ 关闭确认 ============ -->
+<div id="modalQuit" class="modal hidden">
+  <div class="modal-box narrow">
+    <div class="modal-head"><h3>⚠ 参数已修改，尚未保存为配置</h3></div>
+    <div class="modal-body">
+      <p>你对参数配置做了修改，但还没有保存为新的配置方案。</p>
+      <label class="fld"><span>保存为配置名称</span>
+        <input id="inpQuitProfile" type="text" placeholder="留空则丢弃修改"></label>
+    </div>
+    <div class="modal-foot">
+      <button id="btnQuitDiscard" class="btn">丢弃修改并退出</button>
+      <button id="btnQuitCancel" class="btn">取消</button>
+      <button id="btnQuitSave" class="btn primary">保存并退出</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/app.js"></script>
+
+</body>
+</html>
