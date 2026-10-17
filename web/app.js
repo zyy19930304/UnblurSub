@@ -433,7 +433,11 @@ function jasnaFieldVisible(f) {
   const i = dep.indexOf(':');
   if (i < 0) return true;
   const key = dep.slice(0, i), want = dep.slice(i + 1);
-  return String(S.jasnaParams[key]) === want;
+  const cur = String(S.jasnaParams[key]);
+  // 右值可用 | 分隔多个候选（如 restoration_model:ltx|ltx-undistilled）。
+  // 0.11.1 把「未蒸馏」表达成独立的模型名 ltx-undistilled，若只写 ltx，
+  // 选未蒸馏时 LTX 子项会全部消失。
+  return want.split('|').some(w => cur === w);
 }
 
 function jasnaRangeText(f) {
