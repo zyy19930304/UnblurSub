@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Self-test](https://img.shields.io/badge/selftest-433%2F433-4CAF50)
+![Self-test](https://img.shields.io/badge/selftest-475%2F475-4CAF50)
 
 **视频处理 + 中文字幕生成的 Windows 批量桌面工具。**
 
@@ -226,7 +226,7 @@ build.bat
 [2/6] 创建 / 复用 .venv 独立虚拟环境
 [3/6] 升级 pip
 [4/6] 安装 requirements.txt
-[5/6] 运行 selftest.py（433 项断言，不通过则中止打包）
+[5/6] 运行 selftest.py（475 项断言，不通过则中止打包）
 [6/6] PyInstaller onedir 打包
 ```
 
@@ -540,7 +540,7 @@ A：代码有问题导致自测不通过，打包被中止。先跑 `python self
 ## 开发与测试
 
 ```bash
-python selftest.py      # 433 项断言，不需要 GPU / 网络 / 任何外部程序
+python selftest.py      # 475 项断言，不需要 GPU / 网络 / 任何外部程序
 ```
 
 覆盖范围：
@@ -566,7 +566,7 @@ UnblurSub/
 ├── core.py             # 核心逻辑：字幕参数 schema、命名规则、扫描、封装
 ├── jasna_core.py       # Jasna 集成：参数 schema、命令构造、目录校验、依赖自检
 ├── jobs.py             # 任务队列与流水线：模式驱动的视频处理 / 字幕双流程
-├── selftest.py         # 433 项断言的自测套件（零外部依赖）
+├── selftest.py         # 475 项断言的自测套件（零外部依赖）
 ├── build.bat           # 自建 venv + 跑自测 + PyInstaller onedir 打包
 ├── requirements.txt
 └── web/                # 前端（原生 HTML/CSS/JS，无框架无构建）

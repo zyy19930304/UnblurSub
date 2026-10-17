@@ -16,6 +16,9 @@ const S = {
   modes: [], mode: 2,
   logSeq: 0, pollTimer: null, browseTarget: 'folder',
   logGen: 0,                 // 日志世代号：清空日志时 +1，令在途轮询响应作废
+  jobsStamp: '',             // 任务状态指纹：未变化则不重建列表 DOM
+  jobListBuilt: false,       // 列表是否已渲染过
+  polling: false,            // 是否已有轮询在途，防止请求堆积
   saveKind: 'sub',           // 另存配置弹窗当前针对哪套参数
 };
 
@@ -757,6 +760,8 @@ async function start() {
     $('#btnStart').disabled = true; $('#btnStop').disabled = false;
     toast(`开始处理 ${paths.length} 个文件（${meta.label}）`, 'ok');
     $('#jobList').innerHTML = '';
+    S.jobListBuilt = false;    // 列表已清空，下轮必须重建
+    S.jobsStamp = '';          // 强制指纹失效，否则新任务不会渲染出来
     // /api/start 内部会清空后端日志缓冲并推进水位线，
     // 前端游标必须跟着回退到新的水位线，否则第一批日志会被整个跳过。
     try {
@@ -777,21 +782,33 @@ function renderJobs(state) {
   S.job = state;
   const tb = $('#jobList');
   const arr = state.jobs || [];
-  // 用 div 行而非 table：表格的 tbody 上overflow:auto 不生效，
-  // 会导致文件多时列表撑破容器且无法滚动。
-  tb.innerHTML = arr.length ? arr.map(j => `
-    <div class="job-row ${j.status}">
-      <span class="j-st"><span class="st ${j.status}">${statusText(j.status)}</span></span>
-      <span class="j-name" title="${esc(j.src)}">${esc(j.name)}</span>
-      <span class="j-prog"><i class="bar"><i style="width:${j.progress}%"></i></i></span>
-      <span class="j-stage">${esc(j.stage || '')}${j.elapsed ? ' · ' + j.elapsed + 's' : ''}</span>
-    </div>`).join('')
-    : '<div class="j-empty">暂无任务</div>';
 
-  const done = arr.filter(j => j.status === 'done' || j.status === 'failed' || j.status === 'skipped').length;
-  const total = arr.length;
-  $('#overallBar').style.width = total ? (done / total * 100) + '%' : '0%';
+  // 指纹比对：绝大多数轮询其实什么都没变。
+  // 此时若仍重建全部 DOM（文件上千时是几千个节点），
+  // 主线程会被占满，表现就是日志停更、点「停止」毫无反应。
+  // 未变化时只更新按钮与进度条，不碰列表 DOM。
+  const stamp = state.jobs_stamp || '';
+  const changed = stamp !== S.jobsStamp;
+  if (changed) S.jobsStamp = stamp;
+
+  if (changed || !S.jobListBuilt) {
+    // 用 div 行而非 table：表格的 tbody 上overflow:auto 不生效，
+    // 会导致文件多时列表撑破容器且无法滚动。
+    tb.innerHTML = arr.length ? arr.map(j => `
+      <div class="job-row ${j.status}">
+        <span class="j-st"><span class="st ${j.status}">${statusText(j.status)}</span></span>
+        <span class="j-name" title="${esc(j.src || j.name || '')}">${esc(j.name || j.src || '')}</span>
+        <span class="j-prog"><i class="bar"><i style="width:${j.progress || 0}%"></i></i></span>
+        <span class="j-stage">${esc(j.stage || '')}${j.elapsed ? ' · ' + j.elapsed + 's' : ''}</span>
+      </div>`).join('')
+      : '<div class="j-empty">暂无任务</div>';
+    S.jobListBuilt = true;
+  }
+
   const s = state.summary || {};
+  const total = arr.length || state.n_total || 0;
+  const done = (s.done || 0) + (s.failed || 0) + (s.skipped || 0);
+  $('#overallBar').style.width = total ? (done / total * 100) + '%' : '0%';
   $('#sumBar').innerHTML = total
     ? `共 <b>${total}</b> ｜ 成功 <b>${s.done || 0}</b> ｜ 失败 <b class="f">${s.failed || 0}</b> ｜ 跳过 <b class="s">${s.skipped || 0}</b>`
     : '';
@@ -804,6 +821,9 @@ function statusText(s) {
 }
 
 /* ---------------- 日志轮询 ---------------- */
+/*轮询用 brief 模式：只取渲染必需字段。
+  文件上千时全量状态可达数百 KB，每 900ms 传一次+重建全部 DOM，
+  主线程被占满 → 日志不更新、点「停止」没反应。 */
 function startPolling() {
   if (S.pollTimer) return;
   S.pollTimer = setInterval(async () => {
@@ -812,16 +832,25 @@ function startPolling() {
     // 否则那批旧日志会被 append 回刚清空的列表，正是「清空后旧日志又出来」的成因。
     const gen = S.logGen;
     const since = S.logSeq;
+    // 上一轮请求可能还没回来：直接跳过本轮，避免请求堆积（雪上加霜）
+    if (S.polling) return;
+    S.polling = true;
     try {
       const [lg, js] = await Promise.all([
         api('/api/job/logs?since=' + since),
-        api('/api/job/state'),
+        api('/api/job/state?brief=1'),
       ]);
       if (gen !== S.logGen) { renderJobs(js); return; }   // 已过期，只刷新任务区
       if (lg.lines.length) {
         S.logSeq = lg.seq;
         const box = $('#logBox');
         const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        // 日志区也设上限：跑久了 DOM 节点累积同样会拖慢主线程
+        const nodes = box.querySelectorAll('.log-line');
+        const MAX_NODES = 3000;
+        if (nodes.length > MAX_NODES) {
+          for (let i = 0; i < nodes.length - MAX_NODES; i++) nodes[i].remove();
+        }
         box.insertAdjacentHTML('beforeend', lg.lines.map(l =>
           `<div class="log-line ${esc(l.level)}"><span class="tm">${esc(l.t)}</span>${esc(l.text)}</div>`).join(''));
         if (atBottom) box.scrollTop = box.scrollHeight;
@@ -831,6 +860,7 @@ function startPolling() {
       }
       renderJobs(js);
     } catch (e) { /* 服务未就绪 */ }
+    finally { S.polling = false; }
   }, 900);
 }
 
@@ -1194,7 +1224,11 @@ function bind() {
 
   $('#btnStart').onclick = start;
   $('#btnStop').onclick = stop;
-  $('#btnClearDone').onclick = async () => { await api('/api/job/clear_finished'); };
+  $('#btnClearDone').onclick = async () => {
+    await api('/api/job/clear_finished');
+    S.jobsStamp = '';            // 任务列表已变，强制下轮重绘
+    S.jobListBuilt = false;
+  };
   $('#btnClearLog').onclick = clearLog;
   $('#btnCloseApp').onclick = doQuit;
 

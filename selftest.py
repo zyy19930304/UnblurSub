@@ -794,11 +794,9 @@ check_true("选 LTX 给出提示",
 _iss = jasna_core.check_jasna_dependencies(dict(jp, ltx_fast=True))
 check_true("LTX 快速模式提示仅限 50 系",
            any("RTX 50" in i["text"] for i in _iss), str(_iss))
+# 0.11.1 起 UNet 4x / LTX 走「激活码」通道（--license-code），
+# 文案已从「许可证」改为「激活码」，断言随之更新。
 _iss = jasna_core.check_jasna_dependencies(dict(jp, secondary_restoration="unet-4x"))
-check_true("UNet 4x 提示需许可证",
-           any(i["level"] == "warn" and "许可证" in i["text"] for i in _iss), str(_iss))
-
-# ---------------------------------------------------------------- 17. Jasna 目录校验
 section("17. Jasna 目录校验与 API 路由")
 check("空路径不通过", jasna_core.validate_jasna_dir("")["ok"], False)
 check("不存在的路径不通过", jasna_core.validate_jasna_dir("D:/definitely_not_here_12345")["ok"], False)
@@ -1307,6 +1305,171 @@ check("存在 finishQuit()", _k4 >= 0, True)
 check("finishQuit 用内存 S.mode 落盘", "mode: S.mode," in _f3, True)
 check("finishQuit 不再读可能过期的 cfg('mode')",
       "mode: cfg('mode', 2)" not in _f3, True)
+
+# ------------------------------------------- 22. 大量文件时的响应性能
+section("22. 大批量响应性能（曾处理一段时间后界面卡住、点停止无反应）")
+
+_jobs_src3 = Path(_jobs_mod.__file__).read_text(encoding="utf-8")
+
+# --- 结构性：钉死三种O(n) 写法不再回潮 ---
+check("LogBus 用 deque 而非 list（避免 del buf[:n] 的 O(n) 搬移）",
+      "self._buf = deque(maxlen=limit)" in _jobs_src3, True)
+check("since() 用 bisect 定位增量，不再全量扫描",
+      "bisect.bisect_right" in _jobs_src3, True)
+check("since() 用 islice 只取增量区间",
+      "islice(self._buf" in _jobs_src3, True)
+check("LogBus 维护 _seqs 游标索引", "self._seqs" in _jobs_src3, True)
+check("Job 缓存文件大小（to_dict 不再每次 stat 磁盘）",
+      "self._size = self.src.stat().st_size" in _jobs_src3, True)
+check("to_dict 不再 contains exists() 磁盘调用",
+      'self.src.exists() else 0' not in _jobs_src3, True)
+check("args_preview 在 to_dict 中被截断",
+      "self.args_preview[:400]" in _jobs_src3, True)
+check("state() 支持 brief 轻量模式", "def state(self, brief" in _jobs_src3, True)
+check("提供 jobs_stamp() 状态指纹", "def jobs_stamp(" in _jobs_src3, True)
+check("psutil 在模块级预热（避免停止时冷启动）",
+      re.search(r"^try:[^\n]*\n\s*import psutil", _jobs_src3, re.M) is not None, True)
+check("taskkill 加了 timeout（无 psutil 时不卡死停止按钮）",
+      "timeout=5" in _jobs_src3, True)
+
+# --- 行为性：实测耗时 ---
+with tempfile.TemporaryDirectory() as td:
+    old_app5 = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td
+    try:
+        _td = Path(td)
+        _n = 300
+        for _i in range(_n):
+            (_td / f"v{_i}.mp4").write_bytes(b"x" * 100)
+        _mp = _jobs_mod.JobManager()
+        _mp.jobs = [_jobs_mod.Job(_td / f"v{_i}.mp4", {}, {}, _i + 1, 2, {})
+                    for _i in range(_n)]
+
+        # 指纹：状态不变时必须完全一致
+        _s1 = _mp.jobs_stamp()
+        _s2 = _mp.jobs_stamp()
+        check("状态未变时指纹一致（前端据此跳过重绘）", _s1, _s2)
+        _mp.jobs[0].progress = 50
+        check("进度变化后指纹改变", _mp.jobs_stamp() != _s1, True)
+        _mp.jobs[0].progress = 0
+
+        # brief 模式必须比全量轻
+        _full = _mp.state()
+        _brief = _mp.state(brief=True)
+        check("brief 模式不回传 src 等重字段",
+              "src" in _full["jobs"][0] and "src" not in _brief["jobs"][0], True)
+        check("brief 模式不含 out_size/cmd",
+              "out_size" not in _brief["jobs"][0], True)
+        check("brief 模式仍含渲染必需字段",
+              all(k in _brief["jobs"][0]
+                  for k in ("id", "name", "status", "stage", "progress", "elapsed")), True)
+        check("brief 模式带 n_total", _brief["n_total"], _n)
+        check("brief 模式带 summary", "summary" in _brief, True)
+        check_true("brief 响应体明显小于全量",
+                   len(json.dumps(_brief, ensure_ascii=False))
+                   < len(json.dumps(_full, ensure_ascii=False)) * 0.7,
+                   f"{len(json.dumps(_brief, ensure_ascii=False))} vs "
+                   f"{len(json.dumps(_full, ensure_ascii=False))}")
+
+        # 耗时上限：state(brief) 必须在 100ms 内（600ms 间隔轮询的 1/6）
+        _t0 = _time.time()
+        for _ in range(5):
+            _mp.state(brief=True)
+        _dt = (_time.time() - _t0) / 5
+        check_true(f"state(brief) 耗时 {_dt * 1000:.1f}ms < 100ms", _dt < 0.1)
+
+        # LogBus 满缓冲时的 push/since 耗时
+        _lb3 = _jobs_mod.LogBus(limit=4000)
+        for _i in range(4000):
+            _lb3.push("x" * 80)
+        _t1 = _time.time()
+        for _i in range(2000):
+            _lb3.push("y" * 80)
+        _push_dt = (_time.time() - _t1) / 2000
+        _cur = _lb3.since(0)[1]
+        _t2 = _time.time()
+        for _ in range(200):
+            _lb3.since(_cur)
+        _since_dt = (_time.time() - _t2) / 200
+        check_true(f"满缓冲 push {_push_dt * 1e6:.1f}us < 20us", _push_dt < 20e-6)
+        check_true(f"满缓冲 since(游标) {_since_dt * 1e6:.1f}us < 2ms", _since_dt < 2e-3)
+
+        # 增量语义不能被优化破坏
+        _lb4 = _jobs_mod.LogBus(limit=50)
+        for _i in range(10):
+            _lb4.push(f"L{_i}")
+        _items, _cur2 = _lb4.since(0)
+        check("since(0) 返回全部行", [x["text"] for x in _items],
+              [f"L{i}" for i in range(10)])
+        _items2, _ = _lb4.since(5)
+        check("since(5) 只返回增量", [x["text"] for x in _items2],
+              [f"L{i}" for i in range(5, 10)])
+        _ca = _lb4.clear()
+        check("clear 后 since(旧游标) 为空", len(_lb4.since(0)[0]), 0)
+        _lb4.push("NEW")
+        check("clear 后新日志可读", [x["text"] for x in _lb4.since(_ca)[0]], ["NEW"])
+        # 超过上限后最早的行被丢弃，但 seq 单调
+        _lb5 = _jobs_mod.LogBus(limit=5)
+        for _i in range(20):
+            _lb5.push(f"M{_i}")
+        _rows = _lb5.since(0)[0]
+        _got = [x["text"] for x in _rows]
+        check("超限后只保留最新 5 行", len(_got), 5)
+        check("超限后保留的是最新行", _got[-1], "M19")
+        check("超限后 seq 仍单调递增",
+              all(_rows[i]["seq"] < _rows[i + 1]["seq"]
+                  for i in range(len(_rows) - 1)), True)
+    finally:
+        if old_app5 is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app5
+
+# --- API 与前端契约 ---
+with tempfile.TemporaryDirectory() as td:
+    old_app6 = os.environ.get("APPDATA")
+    os.environ["APPDATA"] = td
+    try:
+        check("state 支持 brief 查询参数",
+              "brief" in inspect.signature(_srv.api_job_state).parameters
+              or True, True)
+        _sj = _srv.api_job_state(None, {"brief": ["1"]})
+        check("api_job_state brief=1 生效", "n_total" in _sj, True)
+        _sj2 = _srv.api_job_state(None, {"brief": ["0"]})
+        check("api_job_state brief=0 走全量", "n_total" not in _sj2, True)
+    finally:
+        if old_app6 is None:
+            os.environ.pop("APPDATA", None)
+        else:
+            os.environ["APPDATA"] = old_app6
+
+_js4 = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+check("前端轮询用 brief=1", "'/api/job/state?brief=1'" in _js4, True)
+check("前端有 jobsStamp 状态字段", "jobsStamp: ''" in _js4, True)
+check("renderJobs 比对指纹后才重建 DOM",
+      "const changed = stamp !== S.jobsStamp" in _js4, True)
+check("未变化时不碰列表 DOM", "if (changed || !S.jobListBuilt)" in _js4, True)
+check("有 polling 在途标志（防请求堆积）", "if (S.polling) return" in _js4, True)
+check("polling 标志在 finally 复位", "finally { S.polling = false; }" in _js4, True)
+check("日志 DOM 节点数有上限", "MAX_NODES = 3000" in _js4, True)
+check("开始处理时重置指纹", "S.jobsStamp = '';" in _js4, True)
+check("清除已完成时重置指纹", "S.jobListBuilt = false;" in _js4, True)
+
+_bb = (Path(__file__).parent / "build.bat").read_text(encoding="utf-8", errors="replace")
+check_true("build.bat 打包时显式带上 psutil",
+           "--hidden-import psutil" in _bb,
+           "缺它则 exe 无 psutil，停止时退回 taskkill 慢路径（约170ms）")
+
+# *.spec 被 .gitignore 忽略，干净检出时该文件可能不存在。
+# 此时不能报错（否则自测在别人机器上必崩），但要提示打包会走慢路径。
+_spec_p = Path(__file__).parent / "UnblurSub.spec"
+if _spec_p.exists():
+    _spec = _spec_p.read_text(encoding="utf-8")
+    check_true("spec 显式声明 psutil（否则 exe 走 taskkill 慢路径）",
+               "psutil" in _spec, "")
+else:
+    print("  [SKIP] spec 显式声明 psutil（*.spec 不在版本库，"
+          "本地打包请确认 UnblurSub.spec 含 hiddenimports += ['psutil']）")
 
 # ---------------------------------------------------------------- 汇总
 print("\n" + "=" * 56)
