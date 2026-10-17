@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import bisect
+import hashlib
 import os
 import queue
 import shutil
@@ -22,10 +24,21 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
+from itertools import islice
 from pathlib import Path
 
 import core
 import jasna_core
+
+# psutil 是可选依赖，但它是「停止」路径上的关键组件：
+# 缺它就得退回 taskkill，而 taskkill 启动子进程要 ~170ms 且同步等待，
+# 用户点「停止」会明显感到延迟。这里在模块加载时就完成导入，
+# 代价是一次性模块加载，换来停止时的零延迟。
+try:                       # pragma: no cover - 取决于运行环境
+    import psutil          # noqa: F401
+except ImportError:        # pragma: no cover
+    psutil = None
 
 
 class LogBus:
@@ -39,31 +52,43 @@ class LogBus:
     """
 
     def __init__(self, limit: int = 4000):
-        self._buf = []
+        # 用 deque 而非 list：超出上限时 popleft 是 O(1)，
+        # 而 del list[:n] 是 O(n) 搬移——缓冲满后每 push 一行
+        # 就要搬 4000 个指针，日志密集时会把 worker 拖慢数倍。
+        self._buf = deque(maxlen=limit)
         self._lock = threading.Lock()
         self._seq = 0
         self._cleared_at = 0
         self.limit = limit
+        # 游标索引：有序 seq 列表，供 since() 二分定位增量区间。
+        # 早先 since() 每次全量扫描 _buf（O(n)），
+        # 文件多、日志满时每 900ms 一次的轮询足以把主线程拖死。
+        self._seqs = deque(maxlen=limit)
 
     def push(self, text: str, level: str = "info") -> int:
         with self._lock:
             self._seq += 1
             self._buf.append({"seq": self._seq, "t": time.strftime("%H:%M:%S"),
                               "level": level, "text": text})
-            if len(self._buf) > self.limit:
-                del self._buf[: len(self._buf) - self.limit]
+            self._seqs.append(self._seq)
             return self._seq
 
     def since(self, seq: int = 0, limit: int = 800) -> tuple:
         with self._lock:
             floor = max(seq, self._cleared_at)
-            items = [x for x in self._buf if x["seq"] > floor]
-            return items[-limit:], self._seq
+            if not self._buf or self._buf[-1]["seq"] <= floor:
+                return [], self._seq
+            # 二分定位第一条 > floor 的下标，只切出增量区间。
+            # islice 给出的是内部 dict 的引用，必须复制：
+            # 否则调用方可就地改缓冲内容，并发下极难排查。
+            i = bisect.bisect_right(self._seqs, floor)
+            return [dict(d) for d in islice(self._buf, i, i + limit)], self._seq
 
     def clear(self) -> int:
         """清空缓冲并推进水位线，返回清空时的水位线（供前端对齐游标）。"""
         with self._lock:
             self._buf.clear()
+            self._seqs.clear()
             self._cleared_at = self._seq
             return self._cleared_at
 
@@ -91,16 +116,27 @@ class Job:
         self.args_preview = ""
         self.started_at = 0
         self.ended_at = 0
+        # 文件大小在构造时取一次并缓存。
+        # 早先 to_dict() 每次都 exists()+stat()，而 state() 每 900ms 轮询一次
+        # 且要序列化全部任务 —— N 个任务就是 N 次磁盘 I/O，
+        # 文件多时（含机械盘/网络盘）单次 state() 可达几百毫秒，
+        # 叠加并发轮询后前端主线程被阻塞，点「停止」都没反应。
+        try:
+            self._size = self.src.stat().st_size
+        except OSError:
+            self._size = 0
+        self.out_size = 0     # 输出文件大小（成功后回填）
 
     def to_dict(self) -> dict:
         return {
             "id": self.id, "index": self.index, "src": str(self.src),
-            "name": self.src.name, "size": self.src.stat().st_size if self.src.exists() else 0,
+            "name": self.src.name, "size": self._size,
+            "out_size": self.out_size,
             "status": self.status, "stage": self.stage, "progress": self.progress,
             "dst": str(self.dst) if self.dst else "", "srt": str(self.srt) if self.srt else "",
             "intermediate": str(self.intermediate) if self.intermediate else "",
             "mode": self.mode, "cues": self.cues, "error": self.error,
-            "cmd": self.args_preview,
+            "cmd": self.args_preview[:400],
             "elapsed": round((self.ended_at or time.time()) - self.started_at, 1) if self.started_at else 0,
         }
 
@@ -177,15 +213,55 @@ class JobManager:
                 j.index = i + 1
         return removed
 
-    def state(self) -> dict:
+    def state(self, brief: bool = False) -> dict:
+        """队列状态快照。
+
+        brief=True 时只回传任务的状态摘要（不含 src/cmd 等重字段），
+        供每 900ms 一次的轮询使用。全量序列化 N 个任务在文件多时
+        单次可达数百毫秒，是「处理一段时间后界面无响应」的主因。
+        前端靠 jobs_stamp 判断是否需要重绘，未变则完全跳过 DOM 操作。
+        """
         with self._lock:
+            running = self.running and not self._stop.is_set()
+            if not brief:
+                return {
+                    "running": running,
+                    "stopping": self._stop.is_set(),
+                    "current": self.current_id,
+                    "jobs": [j.to_dict() for j in self.jobs],
+                    "summary": dict(self.summary),
+                    "jobs_stamp": self.jobs_stamp(),
+                }
             return {
-                "running": self.running and not self._stop.is_set(),
+                "running": running,
                 "stopping": self._stop.is_set(),
                 "current": self.current_id,
-                "jobs": [j.to_dict() for j in self.jobs],
                 "summary": dict(self.summary),
+                "jobs_stamp": self.jobs_stamp(),
+                "n_total": len(self.jobs),
+                # 轻量列表：只有渲染任务行必需的字段
+                "jobs": [{"id": j.id, "index": j.index, "name": j.src.name,
+                          "status": j.status, "stage": j.stage,
+                          "progress": j.progress,
+                          "elapsed": (round((j.ended_at or time.time()) - j.started_at, 1)
+                                     if j.started_at else 0)}
+                         for j in self.jobs],
             }
+
+    def jobs_stamp(self) -> str:
+        """任务状态的指纹。
+
+        前端据此判断「要不要重绘」：文件多时绝大部分轮询其实什么都没变，
+        盲目重建几千个 DOM 节点会卡住主线程（表现为点停止没反应）。
+        只纳入影响显示的字段，进度按整数参与指纹。
+        """
+        parts = [self.running, self.current_id, self.summary.get("done"),
+                 self.summary.get("failed"), self.summary.get("skipped"),
+                 self.summary.get("canceled"), len(self.jobs)]
+        for j in self.jobs:
+            parts.append(f"{j.id}:{j.status}:{j.progress}:{j.stage}")
+        return hashlib.md5("\n".join(map(str, parts)).encode("utf-8",
+                                                             "replace")).hexdigest()
 
     def _kill_current(self):
         """终止当前正在跑的子进程（连同它派生的孙进程）。
@@ -425,8 +501,13 @@ class JobManager:
         job.stage = "完成"
         self.summary["done"] += 1
         mode_label = jasna_core.MODE_BY_VALUE[mode]["short"]
+        try:
+            out_size = dst.stat().st_size
+        except OSError:
+            out_size = 0
+        job.out_size = out_size
         self.log.push(f"✔ [{job.index}] {src.name} → {dst.name}"
-                      f"（{core.human_size(dst.stat().st_size)}，{mode_label}完成）", "ok")
+                      f"（{core.human_size(out_size)}，{mode_label}完成）", "ok")
         return wd
 
     # ---- 阶段 1：Jasna 视频处理 ----
@@ -581,16 +662,17 @@ def _kill_pid_tree(pid: int, log: "LogBus | None" = None) -> bool:
     必须杀整棵树：Jasna / infer.exe 会再拉起 ffmpeg 等子进程，
     只杀父进程的话，子进程会接着跑并继续往管道写日志 ——
     表现为「点了停止但日志还在跳动」。
+
+    性能：无 psutil 时走 taskkill 兜底，而 taskkill 启动一个进程要 ~170ms，
+    且同步等待返回。这会让「停止」按钮在无 psutil 环境下明显发顿
+    （用户反馈：点停止要等很久才有反应）。
+    因此把 psutil 的导入提到模块级预热 —— 它只是一次性的模块加载，
+    换来停止时的零延迟；拿不到 psutil 时 taskkill 加超时兜底。
     """
     if not pid:
         return False
-    try:
-        import psutil  # 可选依赖
-    except ImportError:
-        psutil = None
-
     killed = False
-    if psutil:
+    if psutil is not None:
         try:
             root = psutil.Process(pid)
             for p in (root.children(recursive=True) + [root]):
@@ -608,11 +690,13 @@ def _kill_pid_tree(pid: int, log: "LogBus | None" = None) -> bool:
         except Exception:
             pass
     if not killed and os.name == "nt":
-        # 没有 psutil 时的兜底：taskkill /T 连同子进程树一起杀
+        # 没有 psutil 时的兜底：taskkill /T 连同子进程树一起杀。
+        # 加 timeout 防止系统繁忙时卡住停止按钮。
         try:
             import subprocess
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5)
             killed = True
         except Exception:
             pass

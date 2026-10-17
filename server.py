@@ -444,8 +444,16 @@ def api_stop(_body, _q):
     return {"ok": True}
 
 
-def api_job_state(_body, _q):
-    return MANAGER.state()
+def api_job_state(body, _q):
+    """任务状态。
+
+    支持 ?brief=1：只回传渲染任务行必需的轻量字段。
+    前端每 900ms 轮询一次，文件多时全量序列化（含 src/cmd 等）
+    单次可达数百毫秒，是「处理一段时间后界面卡住、点停止没反应」的主因。
+    """
+    q = _q or {}
+    brief = (q.get("brief") or ["0"])[0] in ("1", "true", "yes")
+    return MANAGER.state(brief=brief)
 
 
 def api_job_logs(_body, q):

@@ -6,7 +6,7 @@
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![Self-test](https://img.shields.io/badge/selftest-433%2F433-4CAF50)
+![Self-test](https://img.shields.io/badge/selftest-518%2F518-4CAF50)
 
 **视频处理 + 中文字幕生成的 Windows 批量桌面工具。**
 
@@ -168,7 +168,7 @@ Jasna 本身还向以下开源项目致谢，本工具间接使用了它们的�
 ### 1. Jasna（模式 1 / 3 必需）
 
 - 下载：<https://github.com/Kruk2/jasna/releases>（选 Windows + 你的显卡厂商版本）
-- 解压到一个**只含英文与数字**的路径，例如 `D:\tools\jasna-windows-0.10.0`
+- 解压到一个**只含英文与数字**的路径，例如 `D:\tools\jasna-windows-0.11.1`
 - 解压后应包含：`jasna.exe`、`model_weights\`、`tools\`
 - 硬件：**NVIDIA GTX 16 系 / RTX 20 系或更新**（算力 7.5+，GTX 10 系不支持），
   
@@ -226,7 +226,7 @@ build.bat
 [2/6] 创建 / 复用 .venv 独立虚拟环境
 [3/6] 升级 pip
 [4/6] 安装 requirements.txt
-[5/6] 运行 selftest.py（433 项断言，不通过则中止打包）
+[5/6] 运行 selftest.py（518 项断言，不通过则中止打包）
 [6/6] PyInstaller onedir 打包
 ```
 
@@ -388,7 +388,7 @@ Jasna 源码中的 tooltip 原文，按本工具场景裁剪），数值型参�
 
 | 分组        | 关键参数                                                  |
 | --------- | ----------------------------------------------------- |
-| **修复模型**  | BasicVSR++（通用，快）/ LTX（细节最多，慢）；LTX 种子、快速模式、大面积区域优化      |
+| **修复模型**  | BasicVSR++（通用，快）/ LTX 蒸馏版 / LTX 未蒸馏版；LTX 种子、快速模式、大面积区域优化、仅大马赛克用 LTX      |
 | **基本处理**  | 最大片段大小（10–720）、检测模型与阈值（0–1）、FP16、TensorRT 编译          |
 | **高级处理**  | 时间重叠（0–30）、检测间隙/时长、镜头切换检测、交叉淡入淡出、VR180 模式、降噪          |
 | **二次修复**  | UNet 4x / Topaz TVAI / RTX Super Res，修复区域 256→1024 放大 |
@@ -404,7 +404,9 @@ Jasna 源码中的 tooltip 原文，按本工具场景裁剪），数值型参�
 | 快速（低显存 / 老显卡）    | 片段 60 + 关闭模型编译。GTX 16 系 / RTX 20 系建议从这套开始   |
 | 高质量（大显存 / 4K）    | 片段 180 + RTX 超分 4x。峰值约 14.7GB 显存，建议 16GB 以上 |
 | 极速（RTX 超分 2x）    | 保持标准速度，同时用 RTX 2x 放大修复区域                    |
-| 动画 / 2D（YOLO 检测） | Lada YOLO 对 2D 动画定位更准，推荐阈值 0.25             |
+| 动画 / 2D（YOLO 检测） | Lada YOLO v4 对 2D 动画定位更准，推荐阈值约 0.30        |
+| LTX 细节优先（慢）      | 全片用 LTX，细节明显更好但慢得多，需 LTX 授权            |
+| LTX 大块优先（自动分段）  | 仅大马赛克用 LTX、小的用 BasicVSR++，比全片 LTX 快得多     |
 
 字幕参数另有 7 套内置配置，对应 ChickenRice 原有的 5 个 `.bat` 启动方式
 
@@ -415,8 +417,8 @@ Jasna 源码中的 tooltip 原文，按本工具场景裁剪），数值型参�
 这几项依赖外部组件，界面上会明确标注，参数面板顶部也会提示：
 
 - **Topaz TVAI** —— 需单独购买安装 Topaz Video AI，路径要手动指定
-- **UNet 4x** —— Jasna 支持者专属模型（$15+ 赞助解锁），需有效许可证
-- **LTX** —— 需较新的 NVIDIA GPU，可用「LTX 试运行」测速度（画面不正确）
+- **UNet 4x** —— Jasna 支持者专属模型（$15+ 赞助解锁），需在本机激活一次
+- **LTX** —— Jasna 支持者专属（$25 赞助解锁），需在本机激活一次；官方建议 RTX 30/40/50、8 GB 显存、16 GB 内存。可用「LTX 试运行」免费测速度（画面不正确）。注意 LTX **不支持**二次修复与降噪，界面会提前拦截
 
 ### 启动前预检
 
@@ -491,7 +493,7 @@ A：那是 Jasna 在为你的显卡编译 TensorRT 引擎，属正常流程（NV
 
 **Q：Jasna 报「安装路径无效」**
 
-A：Jasna 官方要求安装路径**仅含英文与数字**，请解压到类似 `D:\tools\jasna-windows-0.10.0`
+A：Jasna 官方要求安装路径**仅含英文与数字**，请解压到类似 `D:\tools\jasna-windows-0.11.1`
 
 的位置。设置界面对中文路径会给出黄色警告。
 
@@ -540,7 +542,7 @@ A：代码有问题导致自测不通过，打包被中止。先跑 `python self
 ## 开发与测试
 
 ```bash
-python selftest.py      # 433 项断言，不需要 GPU / 网络 / 任何外部程序
+python selftest.py      # 518 项断言，不需要 GPU / 网络 / 任何外部程序
 ```
 
 覆盖范围：
@@ -566,7 +568,7 @@ UnblurSub/
 ├── core.py             # 核心逻辑：字幕参数 schema、命名规则、扫描、封装
 ├── jasna_core.py       # Jasna 集成：参数 schema、命令构造、目录校验、依赖自检
 ├── jobs.py             # 任务队列与流水线：模式驱动的视频处理 / 字幕双流程
-├── selftest.py         # 433 项断言的自测套件（零外部依赖）
+├── selftest.py         # 518 项断言的自测套件（零外部依赖）
 ├── build.bat           # 自建 venv + 跑自测 + PyInstaller onedir 打包
 ├── requirements.txt
 └── web/                # 前端（原生 HTML/CSS/JS，无框架无构建）

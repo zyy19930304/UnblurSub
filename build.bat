@@ -95,6 +95,7 @@ if exist dist rmdir /s /q dist
   --add-data "web;web" ^
   --collect-submodules webview ^
   --hidden-import webview.platforms.edgechromium ^
+  --hidden-import psutil ^
   --exclude-module tkinter ^
   --exclude-module numpy ^
   --exclude-module matplotlib ^

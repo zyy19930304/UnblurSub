@@ -170,33 +170,46 @@ def auto_selected_mode(stem: str, mode: int, rule: str = "smart") -> bool:
 
 JASNA_PARAM_SCHEMA = [
     # ---- 修复模型 ----
+    # 修复模型名与 0.11.1 的 CLI_RESTORATION_MODELS 一一对应：
+    #   basicvsrpp / ltx / ltx-undistilled
+    # 注意 0.11.1 **没有 --ltx-model 参数**，蒸馏与否是通过
+    # --restoration-model-name 的取值表达的（ltx vs ltx-undistilled）。
+    # 因此这里直接把三个取值都列进枚举，不再单列一个 ltx_model 下拉框——
+    # 否则那个下拉框在0.11.1 上没有对应 CLI 参数，选「未蒸馏」会被静默忽略。
     dict(key="restoration_model", label="修复模型 (restoration_model)", type="enum",
-         default="basicvsrpp", options=["basicvsrpp", "ltx"],
-         option_labels={"basicvsrpp": "BasicVSR++（通用，快）", "ltx": "LTX（细节最多，很慢）"},
+         default="basicvsrpp", options=["basicvsrpp", "ltx", "ltx-undistilled"],
+         option_labels={"basicvsrpp": "BasicVSR++（通用，快）",
+                        "ltx": "LTX 蒸馏版（细节多，很慢）",
+                        "ltx-undistilled": "LTX 未蒸馏版（最佳，慢 1.5 倍）"},
          arg="--restoration-model-name", when="always", group="修复模型",
          need="nvidia",
-         help="常用模型。速度快，适合大多数视频；除非需要最高细节，否则选它。"
-              "LTX 修复细节最多，但慢得多，需要强劲的 NVIDIA GPU，适合短片或喜欢的场景。"),
-    dict(key="ltx_model", label="LTX 模型", type="enum", default="distilled",
-         options=["distilled", "undistilled"],
-         option_labels={"distilled": "蒸馏版（更快）", "undistilled": "未蒸馏（细节稍好，更慢）"},
-         arg=None, when=None, group="修复模型", depends_on="restoration_model:ltx",
-         help="未蒸馏的细节稍好，但耗时更长。蒸馏版更快。"),
+         help="常用模型。速度快，适合大多数视频；除非需要最高细节，否则选BasicVSR++。"
+              "LTX 修复细节最多，但慢得多，需要强劲的 NVIDIA GPU（官方建议 RTX 30/40/50、"
+              "8GB 显存与 16GB 内存），适合短片或喜欢的场景。LTX 有蒸馏与未蒸馏两版："
+              "未蒸馏细节稍好但约慢 1.5 倍。LTX 不支持 VR 左右并排视频、二次修复与降噪。"),
     dict(key="ltx_seed", label="LTX 种子", type="int", default="20260923",
          range=(1, 2147483647, 1), arg="--ltx-seed", when="nonempty",
-         group="修复模型", depends_on="restoration_model:ltx",
-         help="换一个种子，同一视频会得到另一种效果。保留喜欢的种子即可再次得到相同结果。"),
+         group="修复模型", depends_on="restoration_model:ltx|ltx-undistilled",
+         help="换一个种子，同一视频会得到略有不同的效果。保留喜欢的种子即可再次得到相同结果。"),
     dict(key="ltx_fast", label="LTX 快速模式", type="bool", default=False,
          arg="--ltx-fast", when="true", group="修复模型",
-         depends_on="restoration_model:ltx", need="rtx50",
-         help="约快 1.4 倍，细节略少。仅限 RTX 50 系列。"),
+         depends_on="restoration_model:ltx|ltx-undistilled", need="rtx50",
+         help="约快 1.4 倍，细节略少。仅限 RTX 50 系列，且需要对应的快速版模型文件。"),
     dict(key="ltx_large_canvas", label="LTX 大面积区域更清晰", type="bool", default=False,
          arg="--ltx-large-canvas", when="true", group="修复模型",
-         depends_on="restoration_model:ltx", need="vram10g",
-         help="大块区域处理得更细致，但这些部分约慢 3 倍。需要至少 10 GB 可用显存。"),
+         depends_on="restoration_model:ltx|ltx-undistilled", need="vram12g",
+         help="大块区域按 768 像素而非 512 像素修复，细节更多，但这些部分约慢 3 倍。"
+              "需要至少 12 GB 可用显存，不足时该项会被 Jasna 忽略。"),
+    dict(key="ltx_auto_split", label="仅大马赛克用 LTX", type="float", default="",
+         range=(1, 100, 1), arg="--ltx-auto-split", when="nonempty", group="修复模型",
+         depends_on="restoration_model:ltx|ltx-undistilled", placeholder="留空 = 全部用LTX。12 是不错的起点",
+         help="0.11.1 新增。先找出每个视频里的马赛克，只对「最长边达到视频高度该比例」"
+              "的大马赛克用 LTX，小的用快得多的 BasicVSR++，其余画面原样复制，"
+              "并保留视频自身的编码。12 是不错的起点。适合文件夹批量处理；"
+              "无法切分的视频会整段用 LTX。不能与「处理中即可播放」同用。"),
     dict(key="ltx_trial", label="LTX 试运行（无需许可证，画面不正确）", type="bool",
          default=False, arg="--ltx-trial", when="true", group="修复模型",
-         depends_on="restoration_model:ltx",
+         depends_on="restoration_model:ltx|ltx-undistilled",
          help="无需许可证或模型文件的速度测试。画面会不正确。用它来看你的电脑能否运行 LTX 以及速度如何。"),
 
     # ---- 基本处理 ----
@@ -206,35 +219,49 @@ JASNA_PARAM_SCHEMA = [
               "建议 60 或更高。参考：60（安全）、90（平衡）、180（最佳质量，"
               "开「编译 BasicVSR++」需 12GB+ 显存）。4K 视频占用更多显存，"
               "较小的片段大小可能产生类似的质量，但处理速度快得多。"),
+    #检测模型名取自0.11.1 的 jasna/mosaic/detection_registry.py
+    # DETECTION_MODEL_SPECS + RFDETR_MODEL_NAMES：
+    #   YOLO 三款为 lada-yolo-v2 / lada-yolo-v4 / zelefans-vr-yolo-v2，
+    #   rfdetr-* 走正则匹配。**0.10.0 的 lada-yolov8s 在 0.11.1 已不存在**，
+    #继续传会让 Jasna 直接报「invalid choice」退出，故此处已对齐 0.11.1。
     dict(key="detection_model", label="检测模型 (detection_model)", type="enum",
          default="rfdetr-v6", options=["rfdetr-v6", "rfdetr-vr-v1", "rfdetr-v6-large",
-                                       "zelefans-vr-yolo-v2", "lada-yolov8s"],
+                                       "lada-yolo-v4", "lada-yolo-v2",
+                                       "zelefans-vr-yolo-v2"],
          option_labels={"rfdetr-v6": "rfdetr-v6（快速，内置，推荐）",
                         "rfdetr-vr-v1": "rfdetr-vr-v1（VR180，内置）",
                         "rfdetr-v6-large": "rfdetr-v6-large（质量更高，需单独下载）",
-                        "zelefans-vr-yolo-v2": "zelefans-vr-yolo-v2（VR180 备用，需单独下载）",
-                        "lada-yolev8s": "Lada YOLO（2D 动画可能更合适，需单独下载）"},
+                        "lada-yolo-v4": "Lada YOLO v4（2D 动画更合适，需单独下载）",
+                        "lada-yolo-v2": "Lada YOLO v2（旧版，2D 动画，需单独下载）",
+                        "zelefans-vr-yolo-v2": "zelefans-vr-yolo-v2（VR180 备用，需单独下载）"},
          arg="--detection-model", when="always", group="基本处理",
          help="用于寻找需要修复区域的 AI 模型。rfdetr-v6：最新、快速，推荐使用。"
-              "rfdetr-vr-v1：VR180 模型，推荐用于 VR。rfdetr-v6-large：质量更高、速度更慢，"
-              "需单独下载。Lada YOLO 对 2D 动画可能更合适。"),
+              "rfdetr-vr-v1：VR 模型，推荐用于 VR。rfdetr-v6-large：质量更高、速度更慢，"
+              "需单独下载，推荐阈值 0.40。Lada YOLO 对 2D 动画可能更合适，"
+              "其中 v4 是较新版本、推荐阈值约 0.30，v2 为旧版；两者都需单独下载。"
+              "zelefans 为 VR180 备用模型。"),
     dict(key="detection_score_threshold", label="检测阈值", type="float", default=0.35,
          range=(0.0, 1.0, 0.05), arg="--detection-score-threshold", when="nonempty",
          group="基本处理",
          help="AI 标记修复区域所需的置信度。数值越低 = 检测更多区域（可能误检）；"
-              "数值越高 = 检测更少区域（可能漏检）。各模型推荐值："
-              "rfdetr-v6 为 0.35，rfdetr-v6-large 为 0.40。"),
+              "数值越高 = 检测更少区域（可能漏检）。0.11.1 起留空则由 Jasna 按检测模型"
+              "自动采用推荐值。各模型推荐值：rfdetr-v6 为 0.35，rfdetr-v6-large 与"
+              "rfdetr-vr-v1 为 0.40，rfdetr-v5 为 0.25。"),
+    # 以下几项在 Jasna 侧的默认值是 True（--fp16 / --compile-basicvsrpp /
+    # --scene-detection / --enable-crossfade 均为 BooleanOptionalAction 且 default=True），
+    # 所以必须用 when="opt" 显式回传 --no-xxx；否则用户在界面上关掉它们时
+    # 参数不会下发，Jasna 仍按自己的默认值 True 执行 ——表现为「关不掉」。
     dict(key="fp16_mode", label="FP16 模式", type="bool", default=True,
-         arg="--fp16", when="true", group="基本处理",
+         arg="--fp16", when="opt", group="基本处理",
          help="使用半精度计算来减少显存占用，通常还能提升速度。在现代显卡上几乎无画质损失。"
               "建议 RTX 20 系列及以上显卡开启。"),
     dict(key="compile_basicvsrpp", label="编译 BasicVSR++", type="bool", default=True,
-         arg="--compile-basicvsrpp", when="true", group="基本处理",
-         help="将修复模型编译为 TensorRT 子引擎，大幅提升速度（约 2-3 倍）。"
+         arg="--compile-basicvsrpp", when="opt", group="基本处理",
+         depends_on="restoration_model:basicvsrpp",
+         help="将修复模型编译为 TensorRT 子引擎，约快 3 倍且几乎不额外占显存。"
               "首次编译需要 15-60 分钟，请关闭其他应用（含浏览器）并勿使用电脑；"
-              "引擎会被缓存，后续运行自动复用。引擎显存约 1.9GB（片段 60）、"
-              "5.4GB（片段 180）；处理时峰值约 7.6GB（片段 60）、14.7GB（片段 180）。"
-              "显存不足请关闭此项或降低片段大小。建议配合片段大小 60-90 开启。"),
+              "引擎会被缓存到 model_weights，后续运行自动复用，且改片段大小不必重编。"
+              "仅对 BasicVSR++ 有效，选 LTX 时本项不生效。"),
     dict(key="batch_size", label="批处理大小", type="int", default=4,
          range=(1, 16, 1), arg="--batch-size", when="nonempty", group="基本处理",
          help="一次并行处理多少批。越大越快但占用更多显存。不确定时保持默认。"),
@@ -255,11 +282,11 @@ JASNA_PARAM_SCHEMA = [
          help="丢弃持续少于 N 帧的检测（很可能是单帧误检），这些帧保持原样。"
               "保持较小数值，否则真实存在但只持续几帧的目标会被跳过。0 或 1 表示禁用。"),
     dict(key="scene_detection", label="镜头切换检测", type="bool", default=True,
-         arg="--scene-detection", when="true", group="高级处理",
+         arg="--scene-detection", when="opt", group="高级处理",
          help="检测硬切镜头（场景切换），并在切换点结束所有正在跟踪的处理片段，"
               "确保片段不会跨越两个不同镜头，避免处理时混合切换前后的画面。推荐始终开启。"),
     dict(key="enable_crossfade", label="启用交叉淡入淡出", type="bool", default=True,
-         arg="--enable-crossfade", when="true", group="高级处理",
+         arg="--enable-crossfade", when="opt", group="高级处理",
          help="在片段边界处进行平滑过渡，减少画面闪烁。使用已处理的帧，"
               "不会增加任何额外 GPU 开销。建议始终开启。"),
     dict(key="vr_mode", label="VR180 模式", type="enum", default="auto",
@@ -477,13 +504,19 @@ def _opt_flag(field: dict, value) -> list:
 
 
 def _dep_satisfied(dep: str, p: dict) -> bool:
-    """判断 depends_on 条件是否满足。dep 形如 "字段名:取值"。"""
+    """判断 depends_on 条件是否满足。dep 形如 "字段名:取值"。
+
+    取值部分支持用 | 分隔多个候选（"restoration_model:ltx|ltx-undistilled"）。
+    0.11.1 把 LTX 未蒸馏版表达成独立的模型名 ltx-undistilled，
+    若只写 ltx，选未蒸馏时其子项会被误判为「不适用」而全部不传。
+    """
     if not dep:
         return True
     i = dep.find(":")
     if i < 0:
         return True
-    return str(p.get(dep[:i])) == dep[i + 1:]
+    cur = str(p.get(dep[:i]))
+    return any(cur == w for w in dep[i + 1:].split("|"))
 
 
 def build_jasna_args(params: dict, src: Path, dst: Path,
@@ -573,9 +606,23 @@ def builtin_jasna_profiles() -> dict:
                  "不额外增加耗时，质量优于不放大。"),
         "动画 / 2D（YOLO 检测）": mk(
             max_clip_size=90, temporal_overlap=8, codec="hevc",
-            detection_model="lada-yolov8s", detection_score_threshold=0.25,
-            help="Lada YOLO 检测模型对 2D 动画画面中的目标定位更准，推荐阈值 0.25。"
-                 "需确保 model_weights 下有对应权重。"),
+            detection_model="lada-yolo-v4", detection_score_threshold=0.30,
+            help="Lada YOLO 检测模型对 2D 动画画面中的目标定位更准，"
+                 "v4 是较新版本、推荐阈值约 0.30。需确保 model_weights 下有对应权重。"),
+        "LTX 细节优先（慢）": mk(
+            restoration_model="ltx", max_clip_size=90, temporal_overlap=8, codec="hevc",
+            detection_score_threshold=0.35,
+            help="用 LTX 修复，细节明显多于 BasicVSR++，代价是慢得多。"
+                 "需要支持者授权并在本机激活一次，官方建议 RTX 30/40/50、8GB 显存、16GB 内存。"
+                 "LTX 不支持二次修复与降噪，故这两项保持「无」。"
+                 "先跑短片验证速度，满意再用整片。"),
+        "LTX 大块优先（自动分段）": mk(
+            restoration_model="ltx", ltx_auto_split=12,
+            max_clip_size=90, temporal_overlap=8, codec="hevc",
+            detection_score_threshold=0.35,
+            help="仅对较大的马赛克用 LTX，小的用 BasicVSR++，其余画面原样复制，"
+                 "并保留视频自身编码。比全片 LTX 快得多，画质又不明显下降，"
+                 "适合整批处理。同样需要 LTX 授权，且不能与「处理中即可播放」同用。"),
     }
 
 
@@ -653,7 +700,8 @@ def delete_jasna_profile(name: str) -> dict:
 # 注意：Jasna 要求安装路径只含英文与数字，故不做中文路径的特殊处理，
 # 但会在校验结果里提示。
 
-JASNA_DIR_NAME_HINTS = ["jasna-windows-0.10.0", "jasna-windows", "jasna", "Jasna"]
+JASNA_DIR_NAME_HINTS = ["jasna-windows-0.11.1", "jasna-windows-0.10.0",
+                       "jasna-windows", "jasna", "Jasna"]
 
 
 def jasna_exe(jasna_dir: str) -> Path:
@@ -780,22 +828,58 @@ def check_jasna_dependencies(params: dict) -> list:
             out.append({"level": "error",
                         "text": f"已选择 Topaz TVAI，但未找到其 ffmpeg：{ffm}。"
                                 "请先安装 Topaz Video AI。"})
+    # 0.11.1 起LTX 走的是「支持者专属」通道：先在终端里用License code
+    # 在线激活一次，Jasna 会把 Activation key 存到本机，之后离线可用。
+    # 激活参数（--license-code / --activation-key / --machine-key）本工具
+    # **一律不传**：它们是一次性动作，且逐文件调用会反复触发激活流程。
     if sec == "unet-4x":
         out.append({"level": "warn",
-                    "text": "UNet 4x 是 Jasna 支持者专属模型，需要有效的 Jasna 许可证才能激活。"
-                            "若未激活，Jasna 会报错或跳过该步骤。"})
-    if p.get("restoration_model") == "ltx":
+                    "text": "UNet 4x 是 Jasna 支持者专属模型，需先用激活码在本机激活一次"
+                            "（在终端运行 jasna --license-code <码>）。未激活时 Jasna 会报错或跳过。"})
+    model = p.get("restoration_model")
+    is_ltx = model in ("ltx", "ltx-undistilled")
+    if is_ltx:
         out.append({"level": "warn",
-                    "text": "LTX 模型需首次下载，且需要较新的 NVIDIA GPU。"
-                            "可先用「LTX 试运行」测试速度与兼容性（画面不正确）。"})
+                    "text": "LTX 需支持者授权，并需在本机激活一次；模型文件可先用「LTX 试运行」"
+                            "验证显卡能否带动（画面不正确）。官方建议 RTX 30/40/50、8GB 显存、16GB 内存。"})
+        # 0.11.1 main.py 对LTX 组合是硬拒绝，不是警告：
+        #   parser.error(f"{model_option} does not support --secondary-restoration")
+        #   parser.error(f"{model_option} does not support --denoise")
+        # 不在这里拦住的话，用户要等 Jasna 启动、加载完模型才看到报错。
+        if sec != "none":
+            out.append({"level": "error",
+                        "text": f"LTX（{model}）不支持二次修复，请把「二次修复」改为「无」，"
+                                f"否则 Jasna 会直接报错退出。"})
+        if p.get("denoise_strength") != "none":
+            out.append({"level": "error",
+                        "text": "LTX 不支持降噪，请把「降噪强度」改为「无」，"
+                                "否则 Jasna 会直接报错退出。"})
+        if p.get("vr_mode") in ("sbs", "sbs-fisheye"):
+            out.append({"level": "error",
+                        "text": "LTX 不支持 VR 左右并排（SBS）视频，请把「VR180 模式」"
+                                "改为「自动」或「关闭」。"})
+        if p.get("ltx_auto_split") != "" and p.get("fmp4"):
+            out.append({"level": "error",
+                        "text": "「仅大马赛克用 LTX」不能与「处理中即可播放 (fMP4)」同用，"
+                                "请关掉其中一项，否则 Jasna 会直接报错退出。"})
+        if model == "ltx-undistilled":
+            out.append({"level": "warn",
+                        "text": "LTX 未蒸馏版细节稍好，但约慢 1.5 倍。"})
     if p.get("ltx_fast"):
-        out.append({"level": "warn", "text": "LTX 快速模式仅限 RTX 50 系列显卡。"})
+        out.append({"level": "warn",
+                    "text": "LTX 快速模式仅限 RTX 50 系列，且需要对应的快速版模型文件。"})
     if p.get("ltx_large_canvas"):
-        out.append({"level": "warn", "text": "LTX 大面积区域模式需要至少 10 GB 可用显存。"})
-    if p.get("compile_basicvsrpp"):
+        out.append({"level": "warn",
+                    "text": "LTX 大面积区域模式需要至少 12 GB 可用显存，不足时会被 Jasna 忽略。"})
+    if p.get("ltx_auto_split") != "":
+        out.append({"level": "warn",
+                    "text": "「仅大马赛克用 LTX」会先扫描每个视频再按大小分配模型，"
+                            "总耗时可能高于全片用一种模型，但画质/速度比通常更划算。"})
+    if p.get("compile_basicvsrpp") and not is_ltx:
         out.append({"level": "warn",
                     "text": "首次运行会为当前显卡编译 TensorRT 引擎，需 15-60 分钟，"
-                            "期间请勿使用电脑。引擎会缓存到 model_weights，后续复用。"})
+                            "期间请勿使用电脑。引擎会缓存到 model_weights，后续复用；"
+                            "改片段大小不必重新编译。"})
     clip = p.get("max_clip_size")
     ov = p.get("temporal_overlap")
     if isinstance(clip, int) and isinstance(ov, int) and ov * 2 >= clip:
